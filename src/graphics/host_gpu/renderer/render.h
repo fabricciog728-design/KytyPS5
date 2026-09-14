@@ -65,6 +65,10 @@ struct DrawIndexArgs {
 	uint32_t         render_target_slice_offset = 0;
 };
 
+// Shared cap for indirect multi-draw runs. Lives here (not renderDraw.h) so
+// both the run builder and the PM4 front-end see it without extra includes.
+inline constexpr uint32_t kMaxDrawIndexRunDraws = 128;
+
 struct DrawAutoArgs {
 	uint32_t         vertex_count               = 0;
 	uint32_t         instance_count             = 0;

@@ -15,7 +15,7 @@ struct DrawIndexBufferSource {
 };
 
 struct DrawIndexRun {
-	static constexpr size_t MaxDraws = 64;
+	static constexpr size_t MaxDraws = kMaxDrawIndexRunDraws;
 	std::array<vk::DrawIndexedIndirectCommand, MaxDraws> commands {};
 	DrawIndexBufferSource indices;
 };

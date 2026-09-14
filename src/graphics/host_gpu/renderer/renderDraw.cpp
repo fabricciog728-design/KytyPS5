@@ -1281,7 +1281,7 @@ bool BuildDrawIndexRun(std::span<const DrawIndexArgs> draws, DrawIndexRun& run) 
 	const auto index_type = draws[0].index_type_and_size;
 	if (index_type > 1) return false;
 	const uint32_t element_size = index_type == 0 ? 2 : 4;
-	uint64_t       begin = UINT64_MAX, end = 0;
+	uint64_t       begin = UINT64_MAX, end = 0, payload_bytes = 0;
 	for (const auto& item: draws) {
 		const auto address = reinterpret_cast<uint64_t>(item.index_addr);
 		if (item.index_type_and_size != index_type ||
@@ -1292,9 +1292,12 @@ bool BuildDrawIndexRun(std::span<const DrawIndexArgs> draws, DrawIndexRun& run) 
 			return false;
 		begin = std::min(begin, address);
 		end   = std::max(end, address + uint64_t(item.index_count) * element_size);
+		payload_bytes += uint64_t(item.index_count) * element_size;
 	}
-	// Avoid widening scattered tiny index ranges into a large upload.
-	if (end - begin > 16u * 1024u * 1024u) return false;
+	// Merging uploads one contiguous span. A sparse run would upload mostly
+	// padding, so refuse only when the span dwarfs the payload: dense runs of
+	// any size batch, sparse ones fall back to individual draws as before.
+	if (end - begin > 16u * 1024u * 1024u && end - begin > payload_bytes * 4u) return false;
 	DrawIndexRun next;
 	for (size_t i = 0; i < draws.size(); ++i) {
 		const auto& item = draws[i];
@@ -1314,9 +1317,14 @@ bool BuildDrawIndexRun(std::span<const DrawIndexArgs> draws, DrawIndexRun& run) 
 bool RenderExecutor::TryDrawIndexRun(uint64_t submit_id, CommandBuffer& buffer,
                                      std::span<const DrawIndexArgs> draws,
                                      std::span<const uint64_t>      argument_addresses) {
-	if (draws.size() < 2 || draws.size() > 64 || argument_addresses.size() < draws.size() ||
-	    argument_addresses.size() > 64 || buffer.IsInvalid() ||
-	    buffer.GetUserConfig().GetPrimType() != Prospero::PrimitiveType::kTriList ||
+	// Runs are homogeneous by construction (consecutive packets with identical
+	// setup words), so any topology GetDrawTopology maps is shared, exactly as
+	// solo draws use it.
+	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
+	if (draws.size() < 2 || draws.size() > DrawIndexRun::MaxDraws ||
+	    argument_addresses.size() < draws.size() ||
+	    argument_addresses.size() > DrawIndexRun::MaxDraws || buffer.IsInvalid() ||
+	    !GetDrawTopology(buffer.GetUserConfig(), false, topology) ||
 	    buffer.GetRegisters().GetColorControl().mode > 1 ||
 	    buffer.GetRegisters().GetClipControl().clip_disable ||
 	    !DrawHasValidVertexShader(buffer.GetShaders()))
@@ -1444,8 +1452,8 @@ bool RenderExecutor::TryDrawIndexRun(uint64_t submit_id, CommandBuffer& buffer,
 	emit.run_mapping_epoch = mapping_epoch;
 	emit.run_alias_epoch   = alias_epoch;
 	const bool issued =
-	    ExecutePreparedDraw(submit_id, buffer, draw, state, vk::PrimitiveTopology::eTriangleList,
-	                        emit, run.indices, false, false, false, false);
+	    ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, run.indices, false,
+	                        false, false, false);
 	ResetBindings();
 	if (!issued) return false;
 	return true;

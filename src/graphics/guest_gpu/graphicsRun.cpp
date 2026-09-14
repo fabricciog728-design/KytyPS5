@@ -900,14 +900,13 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 }
 
 uint32_t CommandProcessor::TryDrawIndirectRun(std::span<const uint32_t> packets) {
-	constexpr uint32_t max_draws = 64;
+	constexpr uint32_t max_draws = kMaxDrawIndexRunDraws;
 	if (m_draw_run_skip) {
 		--m_draw_run_skip;
 		return 0;
 	}
 	if (packets.size() < 10 || m_index_type_and_size > 1 || !m_index_base_addr ||
-	    !m_draw_indirect_args_base_addr ||
-	    m_ucfg.GetPrimType() != Prospero::PrimitiveType::kTriList)
+	    !m_draw_indirect_args_base_addr)
 		return 0;
 	uint32_t count = 1;
 	while (count < max_draws && (count + 1u) * 5u <= packets.size()) {
