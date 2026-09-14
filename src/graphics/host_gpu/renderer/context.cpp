@@ -107,17 +107,29 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	vk::RenderingAttachmentInfo depth {};
 	depth.imageView   = depth_stencil.image_view;
 	depth.imageLayout = depth_stencil.image_layout;
-	depth.loadOp =
-	    depth_stencil.depth_clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad;
-	depth.storeOp                       = vk::AttachmentStoreOp::eStore;
+	depth.loadOp      = depth_stencil.depth_clear ? vk::AttachmentLoadOp::eClear
+	                  : static_cast<bool>(depth_stencil.load_discard_aspects &
+	                                       vk::ImageAspectFlagBits::eDepth)
+	                        ? vk::AttachmentLoadOp::eDontCare
+	                        : vk::AttachmentLoadOp::eLoad;
+	depth.storeOp = static_cast<bool>(depth_stencil.store_discard_aspects &
+	                                  vk::ImageAspectFlagBits::eDepth)
+	                    ? vk::AttachmentStoreOp::eDontCare
+	                    : vk::AttachmentStoreOp::eStore;
 	depth.clearValue.depthStencil.depth = std::bit_cast<float>(depth_stencil.clear_value[0]);
 
 	vk::RenderingAttachmentInfo stencil {};
 	stencil.imageView   = depth_stencil.image_view;
 	stencil.imageLayout = depth_stencil.image_layout;
-	stencil.loadOp =
-	    depth_stencil.stencil_clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad;
-	stencil.storeOp                         = vk::AttachmentStoreOp::eStore;
+	stencil.loadOp      = depth_stencil.stencil_clear ? vk::AttachmentLoadOp::eClear
+	                  : static_cast<bool>(depth_stencil.load_discard_aspects &
+	                                       vk::ImageAspectFlagBits::eStencil)
+	                        ? vk::AttachmentLoadOp::eDontCare
+	                        : vk::AttachmentLoadOp::eLoad;
+	stencil.storeOp = static_cast<bool>(depth_stencil.store_discard_aspects &
+	                                    vk::ImageAspectFlagBits::eStencil)
+	                      ? vk::AttachmentStoreOp::eDontCare
+	                      : vk::AttachmentStoreOp::eStore;
 	stencil.clearValue.depthStencil.stencil = depth_stencil.clear_value[1];
 
 	vk::RenderingInfo rendering {};

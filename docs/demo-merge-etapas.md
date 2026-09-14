@@ -21,9 +21,17 @@ Regra: 1 etapa por commit, port fiel da `submission` verde, CI precisa ficar ver
 | 8d | ✅ | `3a391b9` | ISA inédito: `S_CMP_GT_U64` (SOPC 0x14, mesmo molde do 8c via `UGreaterThan64`) + teste standalone | `shader_cfg` |
 | 8e | ✅ | `0cf277a` | ISA inédito + IR novo: `S_CMP_GE_U64` (0x15) / `S_CMP_LE_U64` (0x17) com `UGreaterThanEqual64`/`ULessThanEqual64` (`CompareOrdered64` hi/lo + fold); fecha o bloco SOPC U64 | `shader_cfg` |
 | 8f | ✅ | `5b1644e` | ISA inédito: `S_ASHR_I64` (SOP2 0x23, verificado coluna GFX10 do Mesa; 0x0c/0x0d vazios corretos no GFX10) via `ShiftRightArithmetic64` existente + teste standalone | `shader_cfg` |
-| 8g | ✅ | (este commit) | ISA inédito: `S_BFE_I64` (SOP2 0x2a) com lowering com sinal (`shl`+`ashr` por `64-count`, `SCC!=0` mantido) + teste standalone | `shader_cfg` |
+| 8g | ✅ | `446347c` | ISA inédito: `S_BFE_I64` (SOP2 0x2a) com lowering com sinal (`shl`+`ashr` por `64-count`, `SCC!=0` mantido) + teste standalone | `shader_cfg` |
 | 9 | ⬜ | — | SBO/dynamic-state/present parkados pelo revert `f62a4c8` — **ausentes do tip da submission (vermelhos); re-lançar 1 peça por vez com sinal de CI próprio, fora deste commit** | CI por peça |
 | 10 | ⬜ | — | Observabilidade restante: hash naming, dump SPIR-V, `spirv-val` no CI (LTO release feito neste commit) | CI |
+
+## Performance (P)
+
+| # | Status | Commit | Escopo | Validação |
+|---|--------|--------|--------|-----------|
+| P3 | ✅ | (este commit) | Depth `load/store` → `DontCare` quando o attachment está ligado mas intocado: sem side effects PS (`DB_SHADER_CONTROL`), sem writes (`AttachmentWriteAspects` vazio, cobre clears guest/meta), e p/ load também sem testes (depth/bounds/stencil), sem clears e sem sampling (inclui o draw atual). Bind, layout, HTile e chave de pipeline intactos; `RenderAttachment::{load,store}_discard_aspects` entram na chave do render pass | build 3 OS + validation layers/RenderDoc (frames idênticos, `DontCare` no pass) |
+| P2 | ⬜ | — | Download assíncrono de texturas (fila + thread de readback) | boot + cutscenes |
+| P1 | ⬜ | — | Compilação assíncrona de pipelines em runtime (worker + fallback) | stutter em gameplay |
 
 ## Dependência crítica (aprendida no CI)
 

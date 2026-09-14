@@ -683,6 +683,29 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		              ImageSubresourceRange {view.base_level, view.level_count, view.base_layer,
 		                                     view.layer_count},
 		              buffer.Handle());
+		// DB_SHADER_CONTROL fast path (cf. shadPS4 #3588): the target is bound
+		// but may be completely untouched — no PS kill/z/mask export, no
+		// fixed-function depth or stencil write (AttachmentWriteAspects folds
+		// in guest, meta and load clears), no depth/bounds/stencil test, and no
+		// sampling of either aspect by any stage (feedback needs writes, so it
+		// is already excluded; sampled_aspects include this draw's bindings).
+		// The bind, layout, HTile tracking and pipeline key stay untouched;
+		// only load/store traffic is dropped. With no writer the image contents
+		// are unchanged so skipping the store is safe; with no reader on top of
+		// that, skipping the load is safe.
+		const auto ds_aspects = ImageViewOps::DepthAspectMask(depth.desc.view_info.format);
+		const auto sampled_aspects =
+		    image.binding.pixel_sampled_aspects | image.binding.other_sampled_aspects;
+		const bool no_ds_writes =
+		    depth.AttachmentWriteAspects() == vk::ImageAspectFlags{} &&
+		    !PixelShaderHasDepthOrCoverageSideEffects(buffer.GetRegisters().GetShaderRegisters());
+		const auto store_discard_aspects = no_ds_writes ? ds_aspects : vk::ImageAspectFlags{};
+		const auto load_discard_aspects =
+		    (no_ds_writes && !depth.depth_test_enable && !depth.depth_bounds_test_enable &&
+		     !depth.stencil_test_enable &&
+		     (sampled_aspects & ds_aspects) == vk::ImageAspectFlags{})
+		        ? ds_aspects
+		        : vk::ImageAspectFlags{};
 		state.width               = std::min(state.width, depth.desc.info.extent.width);
 		state.height              = std::min(state.height, depth.desc.info.extent.height);
 		state.num_layers          = std::min(state.num_layers, view.layer_count);
@@ -696,6 +719,8 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		attachment.depth_clear    = depth.depth_load_clear_enable;
 		attachment.has_stencil    = static_cast<bool>(aspects & vk::ImageAspectFlagBits::eStencil);
 		attachment.stencil_clear  = depth.stencil_clear_enable || depth.stencil_meta_clear_enable;
+		attachment.load_discard_aspects  = load_discard_aspects;
+		attachment.store_discard_aspects = store_discard_aspects;
 	}
 	if (color_count == 0 && !depth.image_id) {
 		const auto& limits = buffer.GetGraphics().GetPhysicalDeviceProperties().limits;

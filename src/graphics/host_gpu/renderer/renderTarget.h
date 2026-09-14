@@ -20,6 +20,11 @@ struct RenderAttachment {
 	bool                    depth_clear   = false;
 	bool                    has_stencil   = false;
 	bool                    stencil_clear = false;
+	// Aspects whose load/store traffic can be dropped (DontCare). Set only
+	// when nothing can read (load) or write (store) the aspect; part of the
+	// render-pass key via the defaulted equality below.
+	vk::ImageAspectFlags load_discard_aspects  = {};
+	vk::ImageAspectFlags store_discard_aspects = {};
 
 	bool operator==(const RenderAttachment&) const = default;
 };
