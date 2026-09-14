@@ -106,6 +106,34 @@ struct SubmitInfo {
 
 class CommandBuffer {
 public:
+	// Mirror of the dynamic state recorded into the wrapped vk command buffer.
+	// Compared per group by SetGraphicsDynamicParams; everything is plain data
+	// (bit-compared floats computed identically from identical inputs).
+	struct DynamicStateCache {
+		static constexpr uint32_t kViewportSlots   = 16;
+		static constexpr uint32_t kColorSlots      = RENDER_COLOR_ATTACHMENTS_MAX;
+		static constexpr uint32_t kBlendConstants  = 4;
+
+		uint32_t     viewport_count                    = 0;
+		vk::Viewport viewports[kViewportSlots]         = {};
+		vk::Rect2D   scissors[kViewportSlots]          = {};
+		float        line_width                        = 1.0f;
+		float        blend_constants[kBlendConstants]  = {};
+		VkBool32     depth_test_enable                 = 0;
+		VkBool32     depth_write_enable                = 0;
+		vk::CompareOp depth_compare_op                 = vk::CompareOp::eNever;
+		VkBool32     depth_bias_enable                 = 0;
+		float        bias_constant_factor              = 0.0f;
+		float        bias_clamp                        = 0.0f;
+		float        bias_slope_factor                 = 0.0f;
+		bool         stencil_test_enable               = false;
+		uint32_t     stencil_compare_mask[2]           = {};
+		uint32_t     stencil_write_mask[2]             = {};
+		uint32_t     stencil_reference[2]              = {};
+		uint32_t     color_write_count                 = 0;
+		VkBool32     color_write_enable[kColorSlots]   = {};
+	};
+
 	~CommandBuffer() = default;
 
 	KYTY_CLASS_NO_COPY(CommandBuffer);
@@ -130,6 +158,14 @@ public:
 	[[nodiscard]] HW::Context&      GetRegisters() const noexcept { return *m_registers; }
 	[[nodiscard]] HW::UserConfig&   GetUserConfig() const noexcept { return *m_user_config; }
 	[[nodiscard]] HW::Shader&       GetShaders() const noexcept { return *m_shaders; }
+	[[nodiscard]] bool              HasDynamicState() const noexcept { return m_dyn_valid; }
+	[[nodiscard]] const DynamicStateCache& GetDynamicState() const noexcept {
+		return m_dyn_state;
+	}
+	void CommitDynamicState(const DynamicStateCache& state) const noexcept {
+		m_dyn_state = state;
+		m_dyn_valid = true;
+	}
 
 private:
 	explicit CommandBuffer(CommandScheduler& scheduler);
@@ -155,6 +191,8 @@ private:
 	uint64_t            m_debug_arg4      = 0;
 	mutable RenderState m_render_state;
 	mutable bool        m_rendering   = false;
+	mutable DynamicStateCache m_dyn_state;
+	mutable bool              m_dyn_valid = false;
 	HW::Context*        m_registers   = nullptr;
 	HW::UserConfig*     m_user_config = nullptr;
 	HW::Shader*         m_shaders     = nullptr;

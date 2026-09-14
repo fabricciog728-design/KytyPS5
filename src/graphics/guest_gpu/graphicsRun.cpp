@@ -697,6 +697,9 @@ void CommandProcessor::SuspendPm4() {
 }
 
 void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {
+	// Hoisted out of the per-packet loop: two config loads + branches per
+	// packet otherwise. Re-read per call, so debug toggles apply promptly.
+	const bool debug_dump = GraphicsRunDebugDumpEnabled();
 	while (execution.m_buffer_stack.size() > stop_depth) {
 		if (g_gpu_state != nullptr) {
 			g_gpu_state->ProcessCommands();
@@ -731,7 +734,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {
 
 		EXIT_NOT_IMPLEMENTED(remaining_dw < 2);
 
-		if (GraphicsRunDebugDumpEnabled()) {
+		if (debug_dump) {
 			LOGF("CP packet: offset=0x%05" PRIx32 " cmd_id=0x%08" PRIx32 " op=0x%02" PRIx32
 			     " len=%" PRIu32 "\n",
 			     total_dw - remaining_dw, packet_header, opcode, KYTY_PM4_LEN(packet_header));
@@ -741,7 +744,10 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {
 			auto packet_dw = KYTY_PM4_LEN(packet_header);
 			EXIT_NOT_IMPLEMENTED(packet_dw == 0 || packet_dw > remaining_dw);
 			static std::atomic<uint32_t> skip_log_count {0};
-			if (skip_log_count.fetch_add(1) < 2048) {
+			// Load-first: after the cap expires this is a cheap load instead
+			// of an RMW on every predicated packet.
+			if (skip_log_count.load(std::memory_order_relaxed) < 2048 &&
+			    skip_log_count.fetch_add(1) < 2048) {
 				LOGF("\t predicated skip: op=0x%02" PRIx32 ", r=0x%02" PRIx32 ", len=%" PRIu32
 				     ", packet=0x%016" PRIx64 ", cmd_id=0x%08" PRIx32 "\n",
 				     opcode, KYTY_PM4_R(packet_header), packet_dw,
@@ -766,7 +772,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution, size_t stop_depth) {
 
 		auto handler = g_cp_op_func[opcode];
 		if (opcode != Pm4::IT_DRAW_INDEX_INDIRECT) m_draw_run_skip = 0;
-		if (packet_header == 0xc0032500u && !GraphicsRunDebugDumpEnabled()) {
+		if (packet_header == 0xc0032500u && !debug_dump) {
 			const auto consumed = TryDrawIndirectRun({packet, remaining_dw});
 			if (consumed) {
 				execution.m_buffer_stack[buffer_index].offset_dw += consumed;

@@ -547,11 +547,16 @@ void Swapchain::Recreate(bool surface_lost) {
 Swapchain::Status Swapchain::AcquireNextImage() {
 	EXIT_IF(m_handle == nullptr || m_frame_index >= m_image_acquired.size());
 	m_image_index     = static_cast<uint32_t>(-1);
+	// Bounded wait: an infinite acquire hangs the present thread forever when
+	// the GPU stops releasing images. Timeouts recover via the normal Recreate
+	// path like any other swapchain disruption.
 	const auto result = m_window.graphic_ctx.device.acquireNextImageKHR(
-	    m_handle, std::numeric_limits<uint64_t>::max(), m_image_acquired[m_frame_index], nullptr,
-	    &m_image_index);
+	    m_handle, 2000000000ull, m_image_acquired[m_frame_index], nullptr, &m_image_index);
 	switch (result) {
 		case vk::Result::eSuccess: break;
+		case vk::Result::eTimeout:
+			LOGF("vkAcquireNextImageKHR timed out; recreating swapchain\n");
+			return Status::Recreate;
 		case vk::Result::eSuboptimalKHR:
 			LOGF("vkAcquireNextImageKHR returned vk::Result::eSuboptimalKHR\n");
 			return Status::Recreate;
@@ -619,9 +624,23 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, VulkanImage& sourc
 	region.dstOffsets[1].x               = static_cast<int>(m_extent.width);
 	region.dstOffsets[1].y               = static_cast<int>(m_extent.height);
 	region.dstOffsets[1].z               = 1;
-	vk_command.blitImage(source.image, vk::ImageLayout::eTransferSrcOptimal,
-	                     m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal, 1, &region,
-	                     vk::Filter::eLinear);
+	// copyImage performs no format conversion (unlike blit), so it is only
+	// valid for identical formats. The guest pixel format often differs from
+	// the swapchain format, in which case the converting blit is required.
+	if (source.format == m_format && source.extent.width == m_extent.width &&
+	    source.extent.height == m_extent.height) {
+		vk::ImageCopy copy {};
+		copy.srcSubresource = region.srcSubresource;
+		copy.dstSubresource = region.dstSubresource;
+		copy.extent         = {m_extent.width, m_extent.height, 1};
+		vk_command.copyImage(source.image, vk::ImageLayout::eTransferSrcOptimal,
+		                     m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal, 1,
+		                     &copy);
+	} else {
+		vk_command.blitImage(source.image, vk::ImageLayout::eTransferSrcOptimal,
+		                     m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal, 1,
+		                     &region, vk::Filter::eLinear);
+	}
 
 	vk::ImageMemoryBarrier to_present {};
 	to_present.sType         = vk::StructureType::eImageMemoryBarrier;

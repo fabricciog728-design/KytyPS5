@@ -341,12 +341,13 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuf
 		    return output.kind == ShaderRecompiler::IR::StageOutputKind::ViewportIndex;
 	    });
 	constexpr uint32_t viewport_slots = std::size(HW::ScreenViewport {}.viewports);
-	std::array<vk::Viewport, viewport_slots> viewports {};
-	std::array<vk::Rect2D, viewport_slots>   scissors {};
+	static_assert(viewport_slots == CommandBuffer::DynamicStateCache::kViewportSlots);
+	CommandBuffer::DynamicStateCache next {};
 	const uint32_t viewport_count = indexed_viewports ? viewport_slots : 1;
+	next.viewport_count           = viewport_count;
 	for (uint32_t i = 0; i < viewport_count; i++) {
 		const auto& guest    = vp.viewports[i];
-		auto&       viewport = viewports[i];
+		auto&       viewport = next.viewports[i];
 		if (ctx.GetClipControl().clip_disable) {
 			const auto& limits = buffer.GetGraphics().GetPhysicalDeviceProperties().limits;
 			viewport.width  = static_cast<float>(std::min(limits.maxViewportDimensions[0], 16384u));
@@ -363,7 +364,7 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuf
 
 		const auto final_scissor =
 		    calc_final_scissor(vp, ctx.GetScanModeControl(), framebuffer_extent, i);
-		auto& scissor  = scissors[i];
+		auto& scissor  = next.scissors[i];
 		scissor.offset = {final_scissor.left, final_scissor.top};
 		scissor.extent = {static_cast<uint32_t>(final_scissor.right - final_scissor.left),
 		                  static_cast<uint32_t>(final_scissor.bottom - final_scissor.top)};
@@ -373,8 +374,14 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuf
 			scissor.extent = {0, 0};
 		}
 	}
-	vk_buffer.setViewportWithCount(viewport_count, viewports.data());
-	vk_buffer.setScissorWithCount(viewport_count, scissors.data());
+	const bool had_state = buffer.HasDynamicState();
+	const auto& prev     = buffer.GetDynamicState();
+	if (!had_state || prev.viewport_count != viewport_count ||
+	    std::memcmp(prev.viewports, next.viewports, viewport_count * sizeof(vk::Viewport)) != 0 ||
+	    std::memcmp(prev.scissors, next.scissors, viewport_count * sizeof(vk::Rect2D)) != 0) {
+		vk_buffer.setViewportWithCount(viewport_count, next.viewports);
+		vk_buffer.setScissorWithCount(viewport_count, next.scissors);
+	}
 
 	float line_width = ctx.GetLineWidth();
 	if (line_width != 1.0f) {
@@ -387,44 +394,87 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuf
 		}
 		line_width = 1.0f;
 	}
-	vk_buffer.setLineWidth(line_width);
+	next.line_width = line_width;
+	if (!had_state || prev.line_width != line_width) {
+		vk_buffer.setLineWidth(line_width);
+	}
 	const auto&      blend = ctx.GetBlendColor();
 	const std::array blend_constants {blend.red, blend.green, blend.blue, blend.alpha};
-	vk_buffer.setBlendConstants(blend_constants.data());
-	vk_buffer.setDepthTestEnable(depth.depth_test_enable ? VK_TRUE : VK_FALSE);
-	vk_buffer.setDepthWriteEnable(depth.depth_write_enable ? VK_TRUE : VK_FALSE);
-	vk_buffer.setDepthCompareOp(depth.depth_compare_op);
+	std::memcpy(next.blend_constants, blend_constants.data(), sizeof(next.blend_constants));
+	if (!had_state ||
+	    std::memcmp(prev.blend_constants, next.blend_constants, sizeof(next.blend_constants)) !=
+	        0) {
+		vk_buffer.setBlendConstants(blend_constants.data());
+	}
+	next.depth_test_enable  = depth.depth_test_enable ? VK_TRUE : VK_FALSE;
+	next.depth_write_enable = depth.depth_write_enable ? VK_TRUE : VK_FALSE;
+	next.depth_compare_op   = depth.depth_compare_op;
+	if (!had_state || prev.depth_test_enable != next.depth_test_enable ||
+	    prev.depth_write_enable != next.depth_write_enable ||
+	    prev.depth_compare_op != next.depth_compare_op) {
+		vk_buffer.setDepthTestEnable(next.depth_test_enable);
+		vk_buffer.setDepthWriteEnable(next.depth_write_enable);
+		vk_buffer.setDepthCompareOp(next.depth_compare_op);
+	}
 
 	const auto& mode              = ctx.GetModeControl();
 	const auto& poly_offset       = ctx.GetPolyOffset();
 	const bool  use_front         = mode.poly_offset_front_enable && !mode.cull_front;
 	const bool  use_back          = mode.poly_offset_back_enable && !mode.cull_back;
 	const bool  depth_bias_enable = use_front || use_back;
-	vk_buffer.setDepthBiasEnable(depth_bias_enable ? VK_TRUE : VK_FALSE);
+	next.depth_bias_enable        = depth_bias_enable ? VK_TRUE : VK_FALSE;
 	if (depth_bias_enable) {
 		// Vulkan has one bias for both faces. Prefer a visible front face when both are enabled.
 		const float guest_constant_factor =
 		    use_front ? poly_offset.front_offset : poly_offset.back_offset;
-		const float constant_factor = ConvertPolygonOffsetConstantFactor(
+		next.bias_constant_factor = ConvertPolygonOffsetConstantFactor(
 		    guest_constant_factor, poly_offset, depth.desc.view_info.format);
-		const float slope_factor =
+		next.bias_clamp       = poly_offset.clamp;
+		next.bias_slope_factor =
 		    (use_front ? poly_offset.front_scale : poly_offset.back_scale) / 16.0f;
-		vk_buffer.setDepthBias(constant_factor, poly_offset.clamp, slope_factor);
+	}
+	if (!had_state || prev.depth_bias_enable != next.depth_bias_enable ||
+	    (depth_bias_enable && (prev.bias_constant_factor != next.bias_constant_factor ||
+	                           prev.bias_clamp != next.bias_clamp ||
+	                           prev.bias_slope_factor != next.bias_slope_factor))) {
+		vk_buffer.setDepthBiasEnable(next.depth_bias_enable);
+		if (depth_bias_enable) {
+			vk_buffer.setDepthBias(next.bias_constant_factor, next.bias_clamp,
+			                       next.bias_slope_factor);
+		}
 	}
 
+	next.stencil_test_enable = depth.stencil_test_enable;
 	if (depth.stencil_test_enable) {
-		vk_buffer.setStencilCompareMask(vk::StencilFaceFlagBits::eFront,
-		                                depth.stencil_dynamic_front.compareMask);
-		vk_buffer.setStencilCompareMask(vk::StencilFaceFlagBits::eBack,
-		                                depth.stencil_dynamic_back.compareMask);
-		vk_buffer.setStencilWriteMask(vk::StencilFaceFlagBits::eFront,
-		                              depth.stencil_dynamic_front.writeMask);
-		vk_buffer.setStencilWriteMask(vk::StencilFaceFlagBits::eBack,
-		                              depth.stencil_dynamic_back.writeMask);
-		vk_buffer.setStencilReference(vk::StencilFaceFlagBits::eFront,
-		                              depth.stencil_dynamic_front.reference);
-		vk_buffer.setStencilReference(vk::StencilFaceFlagBits::eBack,
-		                              depth.stencil_dynamic_back.reference);
+		next.stencil_compare_mask[0] = depth.stencil_dynamic_front.compareMask;
+		next.stencil_compare_mask[1] = depth.stencil_dynamic_back.compareMask;
+		next.stencil_write_mask[0]   = depth.stencil_dynamic_front.writeMask;
+		next.stencil_write_mask[1]   = depth.stencil_dynamic_back.writeMask;
+		next.stencil_reference[0]    = depth.stencil_dynamic_front.reference;
+		next.stencil_reference[1]    = depth.stencil_dynamic_back.reference;
+	}
+	if (!had_state || prev.stencil_test_enable != next.stencil_test_enable ||
+	    (depth.stencil_test_enable &&
+	     (std::memcmp(prev.stencil_compare_mask, next.stencil_compare_mask,
+	                  sizeof(next.stencil_compare_mask)) != 0 ||
+	      std::memcmp(prev.stencil_write_mask, next.stencil_write_mask,
+	                  sizeof(next.stencil_write_mask)) != 0 ||
+	      std::memcmp(prev.stencil_reference, next.stencil_reference,
+	                  sizeof(next.stencil_reference)) != 0))) {
+		if (depth.stencil_test_enable) {
+			vk_buffer.setStencilCompareMask(vk::StencilFaceFlagBits::eFront,
+			                                next.stencil_compare_mask[0]);
+			vk_buffer.setStencilCompareMask(vk::StencilFaceFlagBits::eBack,
+			                                next.stencil_compare_mask[1]);
+			vk_buffer.setStencilWriteMask(vk::StencilFaceFlagBits::eFront,
+			                              next.stencil_write_mask[0]);
+			vk_buffer.setStencilWriteMask(vk::StencilFaceFlagBits::eBack,
+			                              next.stencil_write_mask[1]);
+			vk_buffer.setStencilReference(vk::StencilFaceFlagBits::eFront,
+			                              next.stencil_reference[0]);
+			vk_buffer.setStencilReference(vk::StencilFaceFlagBits::eBack,
+			                              next.stencil_reference[1]);
+		}
 	}
 
 #if defined(__APPLE__)
@@ -440,9 +490,17 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuf
 		                : VK_FALSE;
 	}
 	if (color_count != 0) {
+		next.color_write_count = color_count;
+		std::memcpy(next.color_write_enable, enable, color_count * sizeof(vk::Bool32));
+	}
+	if ((!had_state || prev.color_write_count != next.color_write_count ||
+	     std::memcmp(prev.color_write_enable, next.color_write_enable,
+	                 next.color_write_count * sizeof(vk::Bool32)) != 0) &&
+	    color_count != 0) {
 		vk_buffer.setColorWriteEnableEXT(color_count, enable);
 	}
 #endif
+	buffer.CommitDynamicState(next);
 }
 
 static bool DrawHasValidVertexShader(const HW::Shader& sh_ctx) {

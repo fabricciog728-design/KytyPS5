@@ -59,6 +59,9 @@ void CommandBuffer::Begin() {
 	auto result = buffer.begin(&begin_info);
 
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	// A recycled wrapper records into a fresh vk command buffer whose dynamic
+	// state is undefined: force a full re-emit on the next draw.
+	m_dyn_valid = false;
 }
 
 void CommandBuffer::End() const {
