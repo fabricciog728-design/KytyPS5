@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -62,7 +63,7 @@ struct ShaderBinaryInfo {
 };
 
 static std::unique_ptr<std::unordered_map<uint64_t, ShaderMappedData>> g_shader_map;
-static std::mutex                                                      g_shader_map_mutex;
+static std::shared_mutex                                                 g_shader_map_mutex;
 
 void ShaderInit() {
 	EXIT_IF(g_shader_map != nullptr);
@@ -73,7 +74,7 @@ void ShaderInit() {
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	EXIT_IF(g_shader_map == nullptr);
 
-	std::scoped_lock lock(g_shader_map_mutex);
+	std::unique_lock lock(g_shader_map_mutex);
 
 	(*g_shader_map)[addr] = data;
 }
@@ -81,7 +82,7 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 static ShaderMappedData ShaderGetMappedData(uint64_t addr, const char* label) {
 	EXIT_IF(g_shader_map == nullptr);
 
-	std::scoped_lock lock(g_shader_map_mutex);
+	std::shared_lock lock(g_shader_map_mutex);
 
 	if (auto iter = g_shader_map->find(addr); iter != g_shader_map->end()) {
 		return iter->second;
@@ -110,6 +111,12 @@ static uint64_t HashShaderCode(std::span<const uint32_t> code) {
 	// GPU ownership is byte-exact, whereas CPU protection covers whole pages.
 	// Hash current backing bytes when only unrelated data on the page is GPU dirty.
 	// Hash all code bytes every time: a partial fingerprint can miss code patches.
+	// The retained scratch is capped at 256 KiB; bigger shaders hash current
+	// backing bytes directly. The path is size-deterministic per shader, so equal
+	// shaders still hash equal (a different path only misses sharing, never hits).
+	if (code.size() > 65536) {
+		return XXH3_64bits(code.data(), code.size_bytes());
+	}
 	if (!code.empty() && code.size_bytes() <= 1024 * 1024) {
 		thread_local std::vector<uint32_t> scratch;
 		if (scratch.size() < code.size()) scratch.resize(code.size());

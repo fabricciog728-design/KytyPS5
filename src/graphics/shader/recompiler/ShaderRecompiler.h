@@ -17,7 +17,7 @@ struct CompileOptions {
 	uint32_t                    user_data_base  = 0;
 	uint32_t                    scratch_dwords  = 0;
 	uint64_t                    shader_hash     = 0;
-	bool                        dump_ir                    = true;
+	bool                        dump_ir                    = false;
 	bool                        early_dump                 = false;
 	bool                        enable_lod_stats           = false;
 	const char*                 dump_label                 = nullptr;

@@ -26,6 +26,8 @@ Builder::Builder(uint32_t version): m_version(version) {
 	m_annotations.reserve(InitialSpirvSectionReserve);
 	m_declarations.reserve(InitialSpirvSectionReserve);
 	m_functions.reserve(InitialSpirvFunctionSectionReserve);
+	m_declaration_ids.reserve(2048);
+	m_import_ids.reserve(16);
 }
 
 uint32_t Builder::AllocateId() {

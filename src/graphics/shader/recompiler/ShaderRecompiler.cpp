@@ -523,8 +523,14 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 	     GetDumpLabel(options), StageName(options.stage), options.shader_hash,
 	     static_cast<uint64_t>(code.size()));
 
-	Decoder::Program decoded;
-	std::vector<uint32_t> joined_code;
+	// Reused across compiles on this thread: DecodeProgram clears and reserves,
+	// so capacity survives. The fused path move-assigns (rare), but still saves
+	// the joined-code allocation. No retention: nothing outlives this function.
+	thread_local Decoder::Program    t_decoded;
+	thread_local std::vector<uint32_t> t_joined_code;
+	t_joined_code.clear();
+	Decoder::Program&   decoded     = t_decoded;
+	std::vector<uint32_t>& joined_code = t_joined_code;
 	if (!options.back_code.empty()) {
 		decoded = DecodeFusedProgram(code, options.back_code, joined_code);
 	} else {
@@ -558,7 +564,6 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 		dispatcher_reason   = cfg.unsupported_reason;
 		LogDispatcherFallback(options, cfg, "build", dispatcher_reason);
 	} else {
-		const auto unstructured_cfg = cfg;
 		LOGF("%s phase begin: stage=%s hash=0x%016" PRIx64 " CFG Structurize\n",
 		     GetDumpLabel(options), StageName(options.stage), options.shader_hash);
 		if (!CFG::Structurize(cfg)) {
@@ -567,7 +572,8 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 			const auto failure_kind  = cfg.failure_kind;
 			const auto failure_block = cfg.failure_block;
 			LogDispatcherFallback(options, cfg, "structurize", dispatcher_reason);
-			cfg                    = unstructured_cfg;
+			// Rebuild instead of keeping a deep copy on the hot path: failures are rare.
+			cfg                    = CFG::BuildGraph(decoded);
 			cfg.unsupported        = true;
 			cfg.failure_kind       = failure_kind;
 			cfg.failure_block      = failure_block;
@@ -639,10 +645,11 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 	if (read_lane_stats.rewritten_reads != 0) {
 		LOGF("%s read-lane elimination: reads=%" PRIu32 "\n", GetDumpLabel(options),
 		     read_lane_stats.rewritten_reads);
+		// Light refresh only: identities and dead code are swept once by the
+		// single cleanup below (same pass shape as shadPS4: ConstProp x2, one
+		// final DCE). Skipping runs is always safe; these are optional opts.
 		IR::ConstantPropagationPass(ir.blocks);
 		IR::ResolveControlFlowIdentities(ir);
-		IR::RemoveIdentities(ir.blocks);
-		IR::EliminateDeadCode(ir.blocks);
 	}
 	const auto waterfalls = IR::RewriteWaterfallDescriptors(ir);
 	if (waterfalls != 0) {
@@ -651,8 +658,6 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 		     GetDumpLabel(options), StageName(options.stage), options.shader_hash, waterfalls);
 		IR::ConstantPropagationPass(ir.blocks);
 		IR::ResolveControlFlowIdentities(ir);
-		IR::RemoveIdentities(ir.blocks);
-		IR::EliminateDeadCode(ir.blocks);
 	}
 	IR::BuildSrtPlan(ir);
 	IR::EliminateDeadCode(ir.blocks);

@@ -7,6 +7,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv {
@@ -23,6 +24,19 @@ struct DeferredPhi {
 
 class Builder {
 public:
+	struct WordVectorHash {
+		std::size_t operator()(const std::vector<uint32_t>& v) const noexcept {
+			// FNV-1a over words; cheap and stable for dedup keys.
+			std::size_t hash = 1469598103934665603ull;
+			for (uint32_t w : v) {
+				hash ^= static_cast<std::size_t>(w);
+				hash *= 1099511628211ull;
+			}
+			hash ^= v.size() + 0x9e3779b97f4a7c15ull;
+			return hash;
+		}
+	};
+
 	explicit Builder(uint32_t version = 0x00010300u);
 	~Builder() = default;
 	KYTY_CLASS_DEFAULT_COPY(Builder);
@@ -80,8 +94,8 @@ private:
 	std::vector<uint32_t>                     m_functions;
 	std::set<uint32_t>                        m_required_capabilities;
 	std::set<std::string>                     m_required_extensions;
-	std::map<std::string, uint32_t>           m_import_ids;
-	std::map<std::vector<uint32_t>, uint32_t> m_declaration_ids;
+	std::unordered_map<std::string, uint32_t> m_import_ids;
+	std::unordered_map<std::vector<uint32_t>, uint32_t, WordVectorHash> m_declaration_ids;
 	size_t                                    m_unpatched_phi_incomings = 0;
 };
 
