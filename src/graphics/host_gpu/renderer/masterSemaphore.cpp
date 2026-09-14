@@ -49,8 +49,21 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	wait_info.pSemaphores    = &m_semaphore;
 	wait_info.pValues        = &tick;
 
-	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	// Bounded wait with refresh: avoids an infinite UINT64_MAX stall on device
+	// loss while preserving the original blocking semantics via retry.
+	for (;;) {
+		const auto result =
+		    m_graphics.device.waitSemaphores(&wait_info, 1000000000ull /* 1s */);
+		if (result == vk::Result::eTimeout) {
+			Refresh();
+			if (IsFree(tick)) {
+				break;
+			}
+			continue;
+		}
+		EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+		break;
+	}
 	Refresh();
 }
 

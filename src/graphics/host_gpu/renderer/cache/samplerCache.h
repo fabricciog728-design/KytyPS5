@@ -20,6 +20,7 @@ class SamplerCache {
 public:
 	explicit SamplerCache(GraphicContext& graphics): m_graphics(graphics) {
 		EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+		m_samplers.reserve(128);
 	}
 	~SamplerCache();
 	KYTY_CLASS_NO_COPY(SamplerCache);
@@ -28,6 +29,11 @@ public:
 
 private:
 	using SamplerKey = std::array<uint32_t, 4>;
+
+	struct SamplerEntry {
+		vk::Sampler sampler = nullptr;
+		uint64_t    tick    = 0;
+	};
 
 	struct SamplerKeyHash {
 		std::size_t operator()(const SamplerKey& key) const {
@@ -43,7 +49,14 @@ private:
 
 	GraphicContext&                                             m_graphics;
 	Common::Mutex                                               m_mutex;
-	std::unordered_map<SamplerKey, vk::Sampler, SamplerKeyHash> m_samplers;
+	std::unordered_map<SamplerKey, SamplerEntry, SamplerKeyHash> m_samplers;
+	// Lookup counter for age-based eviction. Active samplers are touched on
+	// every draw, so a large age margin can never catch an in-flight sampler.
+	uint64_t m_tick = 0;
+
+	// Destroys entries unused for the last kSamplerGcAge lookups. Only runs
+	// past kSamplerGcSize entries, so steady-state games pay nothing.
+	void CollectStale(uint64_t age);
 };
 
 } // namespace Libs::Graphics

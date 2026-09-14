@@ -6,11 +6,31 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 
 namespace Libs::Graphics {
+namespace {
+
+// Min/lod fields vary per draw, so pathological games could grow this map
+// without bound (one driver sampler object per entry). Eviction only kicks in
+// past this many entries; normal games never reach it.
+inline constexpr size_t   kSamplerGcSize = 256;
+inline constexpr uint64_t kSamplerGcAge  = 8192;
+
+} // namespace
 
 SamplerCache::~SamplerCache() {
-	for (const auto& [key, sampler]: m_samplers) {
+	for (const auto& [key, entry]: m_samplers) {
 		(void)key;
-		m_graphics.device.destroySampler(sampler, nullptr);
+		m_graphics.device.destroySampler(entry.sampler, nullptr);
+	}
+}
+
+void SamplerCache::CollectStale(uint64_t age) {
+	for (auto it = m_samplers.begin(); it != m_samplers.end();) {
+		if (m_tick - it->second.tick > age) {
+			m_graphics.device.destroySampler(it->second.sampler, nullptr);
+			it = m_samplers.erase(it);
+		} else {
+			++it;
+		}
 	}
 }
 
@@ -19,7 +39,8 @@ vk::Sampler SamplerCache::GetSampler(const ShaderSamplerResource& r) {
 
 	const SamplerKey key {r.fields[0], r.fields[1], r.fields[2], r.fields[3]};
 	if (auto iter = m_samplers.find(key); iter != m_samplers.end()) {
-		return iter->second;
+		iter->second.tick = ++m_tick;
+		return iter->second.sampler;
 	}
 
 	float      aniso_ratio = 1.0f;
@@ -153,7 +174,10 @@ vk::Sampler SamplerCache::GetSampler(const ShaderSamplerResource& r) {
 	const auto  result     = m_graphics.device.createSampler(&sampler_info, nullptr, &vk_sampler);
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess || vk_sampler == nullptr);
 
-	m_samplers.emplace(key, vk_sampler);
+	m_samplers.emplace(key, SamplerEntry {.sampler = vk_sampler, .tick = ++m_tick});
+	if (m_samplers.size() > kSamplerGcSize) {
+		CollectStale(kSamplerGcAge);
+	}
 	return vk_sampler;
 }
 

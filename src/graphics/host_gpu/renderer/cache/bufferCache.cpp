@@ -442,6 +442,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		return false;
 	}
 	std::vector<vk::BufferCopy> copies;
+	copies.reserve(8);
 	uint64_t                    total_size = 0;
 	vk::Buffer                  source;
 	m_memory_tracker.ForEachUploadRange(
@@ -463,8 +464,24 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		before.buffer              = buffer.Handle();
-		before.offset              = 0;
-		before.size                = buffer.Size();
+		// Narrow the barrier to the uploaded span instead of the whole buffer.
+		// Copies store the destination offset; fall back to full size when empty.
+		uint64_t barrier_offset = 0;
+		uint64_t barrier_size   = buffer.Size();
+		if (!copies.empty()) {
+			uint64_t lo = UINT64_MAX;
+			uint64_t hi = 0;
+			for (const auto& copy : copies) {
+				lo = std::min(lo, static_cast<uint64_t>(copy.dstOffset));
+				hi = std::max(hi, static_cast<uint64_t>(copy.dstOffset + copy.size));
+			}
+			if (hi > lo && hi <= buffer.Size()) {
+				barrier_offset = lo;
+				barrier_size   = hi - lo;
+			}
+		}
+		before.offset              = static_cast<vk::DeviceSize>(barrier_offset);
+		before.size                = static_cast<vk::DeviceSize>(barrier_size);
 		native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 		                       vk::PipelineStageFlagBits::eTransfer,
 		                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &before, 0, nullptr);
