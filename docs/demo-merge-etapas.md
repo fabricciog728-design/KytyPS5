@@ -17,7 +17,8 @@ Regra: 1 etapa por commit, port fiel da `submission` verde, CI precisa ficar ver
 | 7 | ✅ | (este commit) | Build/launcher/config: Thin LTO release, `WIN32_LEAN_AND_MEAN`, `alignment.h` removido (sem uso), launcher `configuration*`, `libJson2` sem `JsonValueClearMethod`, README | CI launcher |
 | 8a | ✅ | `7e51a27` | ISA: `S_MUL_HI_I32` (SOP2 0x36, re-aplica #576 derrubado pelo alinhamento) | `shader_cfg` |
 | 8b | ✅ | `afecaf9` | ISA: `V_FRACT_F16` (VOP1 0x5f) + `V_CMPX_LT_U16` (VOPC 0xb9, re-aplica #582) + filtros `--fract-f16-only`/`--cmpx-lt-u16-only` | `shader_cfg`, `shader_recompiler_compute` |
-| 8c | ✅ | (este commit) | ISA inédito: `S_CMP_LT_U64` (SOPC 0x16, ordem GT/GE/LT/LE dos blocos I32/U32 + `ULessThan64` existente); teste standalone `TestNewShaderRecompilerSopcLtU64`; corrige 2 expectativas 8a para nomes IR atuais | `shader_cfg` |
+| 8c | ✅ | `6b1efcd` | ISA inédito: `S_CMP_LT_U64` (SOPC 0x16) + teste standalone + correções 8a | `shader_cfg` |
+| 8d | ✅ | (este commit) | ISA inédito: `S_CMP_GT_U64` (SOPC 0x14, mesmo molde do 8c via `UGreaterThan64`) + teste standalone | `shader_cfg` |
 | 9 | ⬜ | — | SBO/dynamic-state/present parkados pelo revert `f62a4c8` — **ausentes do tip da submission (vermelhos); re-lançar 1 peça por vez com sinal de CI próprio, fora deste commit** | CI por peça |
 | 10 | ⬜ | — | Observabilidade restante: hash naming, dump SPIR-V, `spirv-val` no CI (LTO release feito neste commit) | CI |
 

@@ -135,6 +135,7 @@ enum class Opcode {
 	S_CMP_LE_U32,
 	S_CMP_EQ_U64,
 	S_CMP_LG_U64,
+	S_CMP_GT_U64,
 	S_CMP_LT_U64,
 
 	V_NOP,
