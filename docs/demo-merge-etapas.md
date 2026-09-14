@@ -13,11 +13,11 @@ Regra: 1 etapa por commit, port fiel da `submission` verde, CI precisa ficar ver
 | 4 | ✅ | `8a13191` | Recompiler hot-path: `ShaderRecompiler.{cpp,h}` (thread_local, rebuild-vs-copy, passes enxutos, `dump_ir=false`), `shader.cpp` (shared_mutex + XXH3 direto >64K), `SpirvBuilder.{h,cpp}` (reserve + unordered dedup), `SpirvEmitter.cpp` (validate só NDEBUG) | `shader_cfg`, `shader_recompiler_compute`, `resource_*` |
 | 5 | ✅ | `66d5b02` | LOD single-bit: `ResourceMaterialization.{h,cpp}` (`enable_lod_stats`), `ResourceMaterializationTests.cpp`, `ShaderRecompilerComputeTests.cpp`, CMake `shader_lod_emission` | `shader_lod_feedback`, `shader_lod_emission` |
 | CI | ✅ | `5f918ad` | `.github/workflows/build.yml`: push também em `demo-merge-pr500-pr599` | Actions verde |
-| 6 | ⬜ | — | Áudio/vídeo HLE hot-path (deferido da submission: `audio.cpp`, `libAudio2.cpp`, `ajm.cpp`, `videoDec2Decoder.cpp`, `network.cpp`) | `audio_out2_port` + cutscenes |
-| 7 | ⬜ | — | Upload batching / staging temp / page-manager alias (resto do `6b6d442` + `0864941` não portado) | boot UE4/5 |
-| 8 | ⬜ | — | ISA RDNA2 incremental com testes golden (`V_FRACT_F16`, `V_CMPX`, `S_MUL_HI`, MIMG atomics, DPP/SDWA) | `shader_recompiler_compute` |
-| 9 | ⬜ | — | SBO/dynamic-state/present parkados pelo revert `f62a4c8` (`uniqueFunction.h`, `context.cpp`, `swapchain.cpp`) — re-lançar fatiado com sinal de CI próprio | CI por peça |
-| 10 | ⬜ | — | Observabilidade: hash naming, dump SPIR-V, `spirv-val` no CI, LTO release | CI |
+| 6 | ✅ | (este commit) | Áudio/vídeo HLE: `audio.cpp` (SDL_CVT cached, fast-path, AudioTrace), `libAudio2.cpp`, `ajm.cpp`, `videoDec2Decoder.cpp` (tail zeroing), `network.cpp`, `emulatorConfig` + `main.cpp` (`--audio-trace`) | `audio_out2_port`, `emulator_audio_trace_cli` |
+| 7 | ✅ | (este commit) | Build/launcher/config: Thin LTO release, `WIN32_LEAN_AND_MEAN`, `alignment.h` removido (sem uso), launcher `configuration*`, `libJson2` sem `JsonValueClearMethod`, README | CI launcher |
+| 8 | ⬜ | — | ISA RDNA2 incremental com testes golden (sem delta no tip; trabalho futuro fora da submission) | `shader_recompiler_compute` |
+| 9 | ⬜ | — | SBO/dynamic-state/present parkados pelo revert `f62a4c8` — **ausentes do tip da submission (vermelhos); re-lançar 1 peça por vez com sinal de CI próprio, fora deste commit** | CI por peça |
+| 10 | ⬜ | — | Observabilidade restante: hash naming, dump SPIR-V, `spirv-val` no CI (LTO release feito neste commit) | CI |
 
 ## Dependência crítica (aprendida no CI)
 

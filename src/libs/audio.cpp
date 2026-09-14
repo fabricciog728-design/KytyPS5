@@ -3,6 +3,7 @@
 #include "SDL.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/magicEnum.h"
 #include "common/stringUtils.h"
@@ -109,6 +110,18 @@ private:
 
 		SDL_AudioDeviceID audio_device = 0;
 		SDL_AudioSpec     audio_spec   = {};
+
+		// Cached SDL conversion: rebuilt only when guest/host format changes.
+		SDL_AudioCVT  cached_cvt      = {};
+		bool          cvt_valid       = false;
+		SDL_AudioFormat cvt_src_format  = 0;
+		Uint8         cvt_src_channels = 0;
+		int           cvt_src_rate     = 0;
+		SDL_AudioFormat cvt_dst_format  = 0;
+		Uint8         cvt_dst_channels = 0;
+		int           cvt_dst_rate     = 0;
+		uint32_t      cvt_out_channels = 0;
+		Format        cvt_guest_format = Format::Unknown;
 	};
 
 	struct PortIn {
@@ -253,6 +266,7 @@ bool Audio::OpenSdlDevice(PortOut* port) {
 	}
 
 	port->audio_spec = obtained;
+	port->cvt_valid  = false;
 	SDL_PauseAudioDevice(port->audio_device, 0);
 
 	LOGF("AudioOut: opened SDL device (%d Hz, %u ch, format 0x%04x)\n", obtained.freq,
@@ -270,6 +284,7 @@ void Audio::CloseSdlDevice(PortOut* port) {
 
 	port->audio_device = 0;
 	port->audio_spec   = {};
+	port->cvt_valid    = false;
 }
 
 const void* Audio::PrepareOutputBuffer(const PortOut& port, const void* data,
@@ -299,6 +314,30 @@ const void* Audio::PrepareOutputBuffer(const PortOut& port, const void* data,
 
 	// SDL wants back speakers before side speakers; non-STD PCM has them reversed.
 	static constexpr uint32_t SDL_8CH_MAP[8] = {0, 1, 2, 3, 6, 7, 4, 5};
+
+	// Reorder-only fast path: unity volume, just remap channels without mult/div.
+	if (!volume_changed) {
+		if (FormatIsFloat(port.format)) {
+			auto*       dst = reinterpret_cast<float*>(buffer->data());
+			const auto* src = static_cast<const float*>(data);
+			for (uint32_t frame = 0; frame < frames; frame++) {
+				for (uint32_t ch = 0; ch < output_channels; ch++) {
+					const auto src_ch = reorder ? SDL_8CH_MAP[ch] : ch;
+					dst[frame * output_channels + ch] = src[frame * channels + src_ch];
+				}
+			}
+		} else {
+			auto*       dst = reinterpret_cast<int16_t*>(buffer->data());
+			const auto* src = static_cast<const int16_t*>(data);
+			for (uint32_t frame = 0; frame < frames; frame++) {
+				for (uint32_t ch = 0; ch < output_channels; ch++) {
+					const auto src_ch = reorder ? SDL_8CH_MAP[ch] : ch;
+					dst[frame * output_channels + ch] = src[frame * channels + src_ch];
+				}
+			}
+		}
+		return buffer->data();
+	}
 
 	if (FormatIsFloat(port.format)) {
 		auto*       dst = reinterpret_cast<float*>(buffer->data());
@@ -348,31 +387,61 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking) {
 	EXIT_IF(port == nullptr);
 
 	if (port->audio_device == 0 || data == nullptr) {
+		if (Config::AudioTraceEnabled()) {
+			static std::atomic_uint32_t dropped_count = 0;
+			const auto drop_index = dropped_count.fetch_add(1, std::memory_order_relaxed);
+			if (drop_index < 16 || (drop_index % 600) == 0) {
+				LOGF("AudioTrace: host output dropped (device=%u data=%s type=%d rate=%u format=%s)\n",
+				     port->audio_device, data != nullptr ? "set" : "null", port->type, port->freq,
+				     Common::EnumName(port->format).c_str());
+			}
+		}
 		return false;
 	}
 
-	std::vector<uint8_t> prepared_buffer;
+	thread_local std::vector<uint8_t> prepared_buffer;
+	thread_local std::vector<uint8_t> convert_buffer;
 	const void*          prepared_data   = PrepareOutputBuffer(*port, data, &prepared_buffer);
 	const auto           output_channels = OutputChannels(*port);
 	const auto           prepared_size =
 	    BytesPerSample(port->format) * output_channels * port->samples_num;
 
-	std::vector<uint8_t> convert_buffer;
-	const void*          queue_data = prepared_data;
-	uint32_t             queue_size = prepared_size;
+	const void* queue_data = prepared_data;
+	uint32_t    queue_size = prepared_size;
 
-	SDL_AudioCVT cvt {};
-	const int    cvt_result =
-	    SDL_BuildAudioCVT(&cvt, SdlFormat(port->format), static_cast<Uint8>(output_channels),
-	                      static_cast<int>(port->freq), port->audio_spec.format,
-	                      port->audio_spec.channels, port->audio_spec.freq);
-
-	if (cvt_result < 0) {
-		LOGF("AudioOut: SDL_BuildAudioCVT failed: %s\n", SDL_GetError());
-		return false;
+	const auto src_format   = SdlFormat(port->format);
+	const auto src_channels = static_cast<Uint8>(output_channels);
+	const auto src_rate     = static_cast<int>(port->freq);
+	if (!port->cvt_valid || port->cvt_src_format != src_format ||
+	    port->cvt_src_channels != src_channels || port->cvt_src_rate != src_rate ||
+	    port->cvt_dst_format != port->audio_spec.format ||
+	    port->cvt_dst_channels != port->audio_spec.channels ||
+	    port->cvt_dst_rate != port->audio_spec.freq ||
+	    port->cvt_out_channels != output_channels || port->cvt_guest_format != port->format) {
+		SDL_AudioCVT fresh {};
+		const int    fresh_result =
+		    SDL_BuildAudioCVT(&fresh, src_format, src_channels, src_rate,
+		                      port->audio_spec.format, port->audio_spec.channels,
+		                      port->audio_spec.freq);
+		if (fresh_result < 0) {
+			LOGF("AudioOut: SDL_BuildAudioCVT failed: %s\n", SDL_GetError());
+			return false;
+		}
+		port->cached_cvt      = fresh;
+		port->cvt_valid       = true;
+		port->cvt_src_format  = src_format;
+		port->cvt_src_channels = src_channels;
+		port->cvt_src_rate    = src_rate;
+		port->cvt_dst_format  = port->audio_spec.format;
+		port->cvt_dst_channels = port->audio_spec.channels;
+		port->cvt_dst_rate    = port->audio_spec.freq;
+		port->cvt_out_channels = output_channels;
+		port->cvt_guest_format = port->format;
 	}
 
-	if (cvt_result > 0) {
+	if (port->cached_cvt.needed) {
+		// SDL_ConvertAudio mutates len/buf in place; copy cached template per push.
+		SDL_AudioCVT cvt = port->cached_cvt;
 		convert_buffer.resize(prepared_size * cvt.len_mult);
 		std::memcpy(convert_buffer.data(), prepared_data, prepared_size);
 
@@ -408,6 +477,15 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking) {
 	if (SDL_QueueAudio(port->audio_device, queue_data, queue_size) < 0) {
 		LOGF("AudioOut: SDL_QueueAudio failed: %s\n", SDL_GetError());
 		return false;
+	}
+	if (Config::AudioTraceEnabled()) {
+		static std::atomic_uint32_t queued_count = 0;
+		const auto queue_index = queued_count.fetch_add(1, std::memory_order_relaxed);
+		if (queue_index < 16 || (queue_index % 600) == 0) {
+			LOGF("AudioTrace: host PCM queued (bytes=%u queued=%u blocking=%s type=%d rate=%u)\n",
+			     queue_size, SDL_GetQueuedAudioSize(port->audio_device), blocking ? "true" : "false",
+			     port->type, port->freq);
+		}
 	}
 
 	return true;
@@ -446,6 +524,12 @@ Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, For
 
 			if (type != AUDIO_OUT_PORT_TYPE_VIBRATION) {
 				OpenSdlDevice(&port);
+			}
+			if (Config::AudioTraceEnabled()) {
+				LOGF("AudioTrace: host port=%d type=%d frames=%u rate=%u channels=%d format=%s device=%s\n",
+				     id + 1, type, samples_num, freq, port.channels_num,
+				     Common::EnumName(format).c_str(),
+				     port.audio_device != 0 ? "open" : "unavailable");
 			}
 
 			return Id::Create(id);
@@ -527,6 +611,14 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 
 	const auto& first_port = m_out_ports[params[0].handle.GetId()];
 
+	if (Config::AudioTraceEnabled()) {
+		static std::atomic_uint32_t output_count = 0;
+		const auto output_index = output_count.fetch_add(1, std::memory_order_relaxed);
+		if (output_index < 16 || (output_index % 600) == 0) {
+			LOGF("AudioTrace: AudioOut batch=%u frames=%u rate=%u blocking=%s\n", num,
+			     first_port.samples_num, first_port.freq, blocking ? "true" : "false");
+		}
+	}
 	uint64_t block_time   = (1000000 * first_port.samples_num) / first_port.freq;
 	uint64_t current_time = LibKernel::KernelGetProcessTime();
 
@@ -1129,6 +1221,14 @@ static void playback_simulate(void* arg) {
 
 		if (play_data != nullptr) {
 			// TODO(): Audio output is not yet implemented, so simulate audio delay
+			if (Config::AudioTraceEnabled()) {
+				static std::atomic_uint32_t simulated_count = 0;
+				const auto simulated_index = simulated_count.fetch_add(1, std::memory_order_relaxed);
+				if (simulated_index < 16 || (simulated_index % 600) == 0) {
+					LOGF("AudioTrace: Audio3d consumed a grain without host PCM output (delay=%" PRIu64
+					     " us)\n", port->data_delay);
+				}
+			}
 			Common::Thread::SleepMicro(port->data_delay);
 			play_data->state = Audio3dData::State::Empty;
 		}
@@ -2212,6 +2312,11 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id,
 	}
 
 	LOGF("\t type                   = %s\n", Common::EnumName(rack->type).c_str());
+	if (Config::AudioTraceEnabled()) {
+		LOGF("AudioTrace: NGS2 rack id=0x%04" PRIx32 " type=%s voices=%u ports=%u channels=%u\n",
+		     rack_id, Common::EnumName(rack->type).c_str(), option->max_voices, option->max_ports,
+		     option->max_output_channels);
+	}
 
 	rack->allocator   = Ngs2BufferAllocator();
 	rack->buffer_info = *buffer_info;
@@ -2409,6 +2514,18 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 
 	Common::LockGuard lock(ngs->mutex);
 
+	const bool trace_render = Config::AudioTraceEnabled() &&
+	                          (ngs->render_count < 16 || (ngs->render_count % 600) == 0);
+	if (trace_render) {
+		LOGF("AudioTrace: NGS2 render=%" PRIu64 " writes silence; buffers=%u grain=%u rate=%u\n",
+		     ngs->render_count + 1, num_buffer_info, ngs->option.num_grain_samples,
+		     ngs->option.sample_rate);
+		for (uint32_t i = 0; i < num_buffer_info; i++) {
+			LOGF("AudioTrace: NGS2 buffer[%u] address=0x%016" PRIx64 " bytes=%zu type=0x%08" PRIx32
+			     " channels=%u\n", i, reinterpret_cast<uint64_t>(buffer_info[i].buffer),
+			     buffer_info[i].buffer_size, buffer_info[i].waveform_type, buffer_info[i].num_channels);
+		}
+	}
 	for (uint32_t i = 0; i < num_buffer_info; i++) {
 		if (buffer_info[i].buffer != nullptr && buffer_info[i].buffer_size != 0) {
 			std::memset(buffer_info[i].buffer, 0, buffer_info[i].buffer_size);
@@ -2777,6 +2894,15 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 	Common::LockGuard lock(voice->rack->ngs->mutex);
 
 	const auto* param = param_list;
+	if (Config::AudioTraceEnabled()) {
+		static std::atomic_uint32_t control_count = 0;
+		const auto control_index = control_count.fetch_add(1, std::memory_order_relaxed);
+		if (control_index < 64 || (control_index % 1024) == 0) {
+			LOGF("AudioTrace: NGS2 control voice=0x%016" PRIx64 " rack=%s first_id=0x%08" PRIx32
+			     " size=%u\n", static_cast<uint64_t>(voice_handle),
+			     Common::EnumName(voice->rack->type).c_str(), param->id, param->size);
+		}
+	}
 
 	for (;;) {
 		LOGF("\t id   = 0x%08" PRIx32 "\n"
@@ -2911,6 +3037,15 @@ int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* comma
 
 	(void)voice_handle;
 	(void)commands;
+	if (Config::AudioTraceEnabled()) {
+		static std::atomic_uint32_t command_count = 0;
+		const auto command_index = command_count.fetch_add(1, std::memory_order_relaxed);
+		if (command_index < 64 || (command_index % 1024) == 0) {
+			LOGF("AudioTrace: NGS2 command list ignored (voice=0x%016" PRIx64 " commands=%u flags=0x%08" PRIx32
+			     " data=0x%016" PRIx64 ")\n", static_cast<uint64_t>(voice_handle), num_commands,
+			     flags, reinterpret_cast<uint64_t>(commands));
+		}
+	}
 	(void)num_commands;
 	(void)flags;
 

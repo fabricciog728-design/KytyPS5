@@ -1,5 +1,6 @@
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/threads.h"
 #include "kernel/pthread.h"
@@ -366,9 +367,24 @@ static void audioout2_queue_context_audio(AudioOut2ContextHandle ctx, bool block
 	g_audioout2_port_mutex.Unlock();
 
 	if (params.empty()) {
+		if (Config::AudioTraceEnabled()) {
+			static std::atomic_uint32_t empty_pushes = 0;
+			const auto empty_index = empty_pushes.fetch_add(1, std::memory_order_relaxed);
+			if (empty_index < 16 || (empty_index % 600) == 0) {
+				LOGF("AudioTrace: AudioOut2 context=0x%016" PRIx64 " has no PCM-backed ports\n", ctx);
+			}
+		}
 		return;
 	}
 
+	if (Config::AudioTraceEnabled()) {
+		static std::atomic_uint32_t queue_count = 0;
+		const auto queue_index = queue_count.fetch_add(1, std::memory_order_relaxed);
+		if (queue_index < 16 || (queue_index % 600) == 0) {
+			LOGF("AudioTrace: AudioOut2 context=0x%016" PRIx64 " queues %zu PCM ports blocking=%s\n",
+			     ctx, params.size(), blocking ? "true" : "false");
+		}
+	}
 	(void)AudioInternal::AudioOutOutputs(params.data(), static_cast<uint32_t>(params.size()),
 	                                     blocking);
 }
@@ -526,6 +542,14 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t bloc
 				if (state->queued < state->queue_depth) {
 					state->queued++;
 				}
+				if (Config::AudioTraceEnabled()) {
+					static std::atomic_uint32_t push_count = 0;
+					const auto push_index = push_count.fetch_add(1, std::memory_order_relaxed);
+					if (push_index < 16 || (push_index % 600) == 0) {
+						LOGF("AudioTrace: AudioOut2 push context=0x%016" PRIx64 " queued=%u/%u device_clock=%s\n",
+						     ctx, state->queued, state->queue_depth, use_device_clock ? "true" : "false");
+					}
+				}
 				g_audioout2_context_mutex.Unlock();
 				audioout2_queue_context_audio(ctx, blocking != 0);
 				return OK;
@@ -629,6 +653,14 @@ int KYTY_SYSV_ABI AudioOut2PortCreate(AudioOut2ContextHandle ctx, const AudioOut
 	}
 
 	*port = next_port;
+
+	if (Config::AudioTraceEnabled()) {
+		LOGF("AudioTrace: AudioOut2 port=0x%016" PRIx64 " context=0x%016" PRIx64
+		     " type=%u format=0x%08" PRIx32 " frames=%u rate=%u host=%d device=%s\n",
+		     *port, ctx, params->port_type, params->data_format, samples_num, params->sampling_freq,
+		     audio_handle,
+		     AudioInternal::AudioOutHasDevice(audio_handle) ? "open" : "unavailable");
+	}
 
 	if (next_port <= 16 || (next_port % 600) == 0) {
 		PRINT_NAME();

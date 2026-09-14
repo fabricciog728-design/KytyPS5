@@ -12,6 +12,12 @@ endif()
 
 project(Kyty)
 
+# Thin LTO in Release when supported: free indirect-call + cross-TU inlining
+# across the hot graphics/shader paths without changing code.
+if(NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE)
+	set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+endif()
+
 set(KYTY_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(KYTY_TESTS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests")
 set(KYTY_THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty")
@@ -24,6 +30,11 @@ if (NOT (WIN32 OR LINUX OR APPLE))
     message(FATAL_ERROR "only Windows, Linux, and macOS builds are supported")
 endif()
 
+if(WIN32)
+	add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -83,10 +94,6 @@ if(LINUX OR APPLE)
 	set(KYTY_PLATFORM KYTY_PLATFORM_LINUX)
 else()
 	set(KYTY_PLATFORM KYTY_PLATFORM_WINDOWS)
-endif()
-
-if(WIN32)
-	add_compile_definitions(NOMINMAX)
 endif()
 
 set(CLANG FALSE)
@@ -567,6 +574,11 @@ if(BUILD_TESTING)
 	add_test(NAME emulator_present_mode_invalid
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --present-mode Invalid)
 	set_tests_properties(emulator_present_mode_invalid PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME emulator_audio_trace_cli
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --audio-trace true)
+	add_test(NAME emulator_audio_trace_invalid
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --audio-trace Invalid)
+	set_tests_properties(emulator_audio_trace_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)

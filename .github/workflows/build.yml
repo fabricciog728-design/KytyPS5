@@ -3,7 +3,7 @@ name: Build and Release KytyPS5
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master, 'demo-merge-pr500-pr599' ]
+    branches: [ main, master, 'submission/**', 'demo-merge-pr500-pr599' ]
   pull_request:
 
 env:

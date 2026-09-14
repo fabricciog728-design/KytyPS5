@@ -53,10 +53,13 @@ public:
 	static constexpr int MAX_CONSOLE_LANGUAGE     = 29;
 
 	enum class Resolution {
-		R1280X720,
-		R1920X1080,
-		R2560X1440,
-		R3840X2160,
+    	R640X360,
+    	R854X480,
+    	R960X540,
+    	R1280X720,
+    	R1920X1080,
+    	R2560X1440,
+    	R3840X2160,
 	};
 	Q_ENUM(Resolution)
 
@@ -65,6 +68,12 @@ public:
 
 	enum class PresentMode { Fifo, Mailbox, Immediate };
 	Q_ENUM(PresentMode)
+
+	enum class ShaderLogDirection { Silent, Console, File };
+	Q_ENUM(ShaderLogDirection)
+
+	enum class ProfilerDirection { None, Network };
+	Q_ENUM(ProfilerDirection)
 
 	enum class LogDirection { Silent, Console, File };
 	Q_ENUM(LogDirection)
@@ -87,7 +96,7 @@ public:
 	Resolution             screen_resolution           = Resolution::R1280X720;
 	QString                user_name                   = "Kyty";
 	int                    user_id                     = Config::DEFAULT_USER_ID;
-	PresentMode            present_mode                = PresentMode::Mailbox;
+	PresentMode            present_mode                = PresentMode::Fifo;
 	int                    gpu_index                   = -1;
 	bool                   fullscreen_enabled          = false;
 	bool                   readback_linear_images      = false;
@@ -96,13 +105,13 @@ public:
 	bool                   vulkan_validation_enabled   = false;
 	bool                   shader_validation_enabled   = true;
 	ShaderOptimizationType shader_optimization_type    = ShaderOptimizationType::Performance;
-	LogDirection           shader_log_direction        = LogDirection::Silent;
+	ShaderLogDirection     shader_log_direction        = ShaderLogDirection::Silent;
 	QString                shader_log_folder           = "_Shaders";
 	bool                   command_buffer_dump_enabled = false;
 	QString                command_buffer_dump_folder  = "_Buffers";
 	LogDirection           printf_direction            = LogDirection::Silent;
 	QString                printf_output_file          = "_kyty.txt";
-	bool                   profiler_enabled            = false;
+	ProfilerDirection      profiler_direction          = ProfilerDirection::None;
 	bool                   renderdoc_enabled           = false;
 #if defined(_WIN32)
 	bool red_zone_protection_enabled = false;
@@ -130,7 +139,7 @@ public:
 		command_buffer_dump_folder  = other.command_buffer_dump_folder;
 		printf_direction            = other.printf_direction;
 		printf_output_file          = other.printf_output_file;
-		profiler_enabled            = other.profiler_enabled;
+		profiler_direction          = other.profiler_direction;
 		renderdoc_enabled           = other.renderdoc_enabled;
 #if defined(_WIN32)
 		red_zone_protection_enabled = other.red_zone_protection_enabled;
@@ -175,7 +184,7 @@ public:
 		KYTY_CFG_SET(command_buffer_dump_folder);
 		KYTY_CFG_SET(printf_direction);
 		KYTY_CFG_SET(printf_output_file);
-		KYTY_CFG_SET(profiler_enabled);
+		KYTY_CFG_SET(profiler_direction);
 		KYTY_CFG_SET(renderdoc_enabled);
 #if defined(_WIN32)
 		KYTY_CFG_SET(red_zone_protection_enabled);
@@ -199,7 +208,7 @@ public:
 		KYTY_CFG_GET(present_mode);
 		gpu_index = s->value("gpu_index", -1).toInt();
 		if (EnumToText(present_mode).isEmpty()) {
-			present_mode = PresentMode::Mailbox;
+			present_mode = PresentMode::Fifo;
 		}
 		KYTY_CFG_GET(fullscreen_enabled);
 		KYTY_CFG_GET(readback_linear_images);
@@ -217,7 +226,7 @@ public:
 		KYTY_CFG_GET(command_buffer_dump_folder);
 		KYTY_CFG_GET(printf_direction);
 		KYTY_CFG_GET(printf_output_file);
-		KYTY_CFG_GET(profiler_enabled);
+		KYTY_CFG_GET(profiler_direction);
 		KYTY_CFG_GET(renderdoc_enabled);
 #if defined(_WIN32)
 		red_zone_protection_enabled =

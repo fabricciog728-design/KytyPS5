@@ -284,16 +284,24 @@ private:
 		}
 
 		auto* dst = static_cast<uint8_t*>(frame_buffer.data);
-		std::memset(dst, 0, static_cast<size_t>(required));
+		const auto tail = pitch > width ? pitch - width : 0u;
 		if (frame->format == AV_PIX_FMT_NV12) {
 			for (uint32_t y = 0; y < height; y++) {
-				std::memcpy(dst + static_cast<size_t>(y) * pitch,
-				            frame->data[0] + static_cast<ptrdiff_t>(y) * frame->linesize[0], width);
+				auto* row = dst + static_cast<size_t>(y) * pitch;
+				std::memcpy(row, frame->data[0] + static_cast<ptrdiff_t>(y) * frame->linesize[0],
+				            width);
+				if (tail != 0) {
+					std::memset(row + width, 0, tail);
+				}
 			}
 			auto* chroma = dst + static_cast<size_t>(pitch) * height;
 			for (uint32_t y = 0; y < chroma_rows; y++) {
-				std::memcpy(chroma + static_cast<size_t>(y) * pitch,
-				            frame->data[1] + static_cast<ptrdiff_t>(y) * frame->linesize[1], width);
+				auto* row = chroma + static_cast<size_t>(y) * pitch;
+				std::memcpy(row, frame->data[1] + static_cast<ptrdiff_t>(y) * frame->linesize[1],
+				            width);
+				if (tail != 0) {
+					std::memset(row + width, 0, tail);
+				}
 			}
 		} else {
 			m_sws = sws_getCachedContext(m_sws, frame->width, frame->height,
@@ -309,6 +317,15 @@ private:
 			if (sws_scale(m_sws, frame->data, frame->linesize, 0, frame->height, output_planes,
 			              output_strides) != frame->height) {
 				return Result::ApiFail;
+			}
+			if (tail != 0) {
+				for (uint32_t y = 0; y < height; y++) {
+					std::memset(dst + static_cast<size_t>(y) * pitch + width, 0, tail);
+				}
+				auto* chroma = dst + static_cast<size_t>(pitch) * height;
+				for (uint32_t y = 0; y < chroma_rows; y++) {
+					std::memset(chroma + static_cast<size_t>(y) * pitch + width, 0, tail);
+				}
 			}
 		}
 

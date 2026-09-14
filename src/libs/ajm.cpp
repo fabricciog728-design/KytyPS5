@@ -595,7 +595,19 @@ static AjmDecodeResult AjmDecodeSplitInstance(uint32_t instance, const AjmBuffer
 		output_size += output_buffers[i].size;
 	}
 
-	std::vector<uint8_t> input(input_size);
+	thread_local std::vector<uint8_t> input;
+	thread_local std::vector<uint8_t> output;
+	// Don't retain pathological peaks forever, but don't thrash legit sizes.
+	if (input.capacity() > (4u << 20u) && input_size <= (1u << 20u)) {
+		input.clear();
+		input.shrink_to_fit();
+	}
+	if (output.capacity() > (4u << 20u) && output_size <= (1u << 20u)) {
+		output.clear();
+		output.shrink_to_fit();
+	}
+	input.resize(input_size);
+	output.resize(output_size);
 	size_t               input_offset = 0;
 	for (size_t i = 0; i < input_buffers_num && input_buffers != nullptr; i++) {
 		if (input_buffers[i].address != nullptr && input_buffers[i].size != 0) {
@@ -605,7 +617,6 @@ static AjmDecodeResult AjmDecodeSplitInstance(uint32_t instance, const AjmBuffer
 		input_offset += input_buffers[i].size;
 	}
 
-	std::vector<uint8_t> output(output_size);
 	auto result = AjmDecodeInstance(instance, input.data(), input.size(), output.data(),
 	                                output.size(), multiple_frames);
 

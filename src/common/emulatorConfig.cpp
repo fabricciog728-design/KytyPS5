@@ -95,6 +95,10 @@ bool GraphicsDebugDumpEnabled() {
 	return g_config->graphics_debug_dump_enabled;
 }
 
+bool AudioTraceEnabled() {
+	return g_config != nullptr && g_config->audio_trace_enabled;
+}
+
 OutputDirection GetPrintfDirection() {
 	return g_config->printf_direction;
 }
