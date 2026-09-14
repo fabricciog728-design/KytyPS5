@@ -1833,7 +1833,7 @@ void TestNewShaderRecompilerScalarVectorAlu() {
       "new decoder did not decode old-backed S_LSHL4_ADD_U32");
   Check(Common::ContainsStr(result.decoded_dump, "s_mul_hi_u32 s13, s12, s1"),
         "new decoder did not decode old-backed S_MUL_HI_U32");
-  Check(Common::ContainsStr(result.decoded_dump, "s_mul_hi_i32 s15, s12, s1"),
+  Check(Common::ContainsStr(result.decoded_dump, "S_MUL_HI_I32 s15, s12, s1"),
         "new decoder did not decode old-backed S_MUL_HI_I32");
   Check(Common::ContainsStr(result.decoded_dump, "v_add_f32 v1"),
         "new decoder did not decode VOP2 float add");
@@ -1871,7 +1871,7 @@ void TestNewShaderRecompilerScalarVectorAlu() {
       "S_LSHL4_ADD_U32 did not lower through carry-writing shift-left-add IR");
   Check(Common::ContainsStr(result.ir_dump, "UMulHighU32 s13, s12, s1"),
         "S_MUL_HI_U32 did not lower to unsigned high-multiply IR");
-  Check(Common::ContainsStr(result.ir_dump, "SMulHighI32 s15, s12, s1"),
+  Check(Common::ContainsStr(result.ir_dump, "SMulHi s15, s12, s1"),
         "S_MUL_HI_I32 did not lower to signed high-multiply IR");
   Check(Common::ContainsStr(result.ir_dump, "CompareGtU32"),
         "SOPC compare did not lower to IR");
@@ -4472,6 +4472,36 @@ void TestNewShaderRecompilerCapturedVopcSdwaCmpxLtU16() {
             Common::ContainsStr(decoded.unsupported_reason,
                                 "VOPC DPP modifier is not supported for opcode"),
         "V_CMPX_LT_U16 accepted an unsupported DPP encoding");
+}
+
+void TestNewShaderRecompilerSopcLtU64() {
+  using namespace ShaderRecompiler;
+
+  // SOPC 0x16 follows the GT/GE/LT/LE order of the I32 (0x02-0x05) and U32
+  // (0x08-0x0b) blocks; only EQ/LG were decoded before.
+  const uint32_t shader[] = {
+      EncodeSopc(0x16, 0, 2), // s_cmp_lt_u64 s[0:1], s[2:3]
+      EncodeSopp(0x01),
+  };
+  Decoder::Instruction decoded;
+  Decoder::DecodeInstruction(shader, 0u, decoded);
+  Check(decoded.family == Decoder::Family::SOPC &&
+            decoded.opcode == Decoder::Opcode::S_CMP_LT_U64 &&
+            decoded.opcode_id == 0x16u && decoded.word_count == 1u &&
+            decoded.dst.kind == Decoder::OperandKind::Scc &&
+            decoded.src_count == 2u,
+        "decoder rejected SOPC S_CMP_LT_U64 fields");
+
+  Decoder::Program program;
+  Decoder::DecodeProgram(shader, program);
+  Check(!CFG::BuildGraph(program).unsupported,
+        "SOPC S_CMP_LT_U64 still fails CFG construction");
+  auto result = RecompileForTest(shader, MakeCompileOptions(ShaderType::Compute));
+  Check(Common::ContainsStr(result.decoded_dump, "S_CMP_LT_U64"),
+        "SOPC S_CMP_LT_U64 is missing from decoded dump");
+  Check(Common::ContainsStr(result.ir_dump, "ULessThan64"),
+        "S_CMP_LT_U64 did not lower to unsigned 64-bit less-than IR");
+  CheckSpirvBinaryValidates(result.spirv);
 }
 
 void TestNewShaderRecompilerIrLookupMissFailsExplicitly() {
@@ -12874,6 +12904,7 @@ int main() {
   TestSopkCompareImmediateExtension();
   TestNewShaderRecompilerCapturedVopcSdwaCmpxClass();
   TestNewShaderRecompilerCapturedVopcSdwaCmpxLtU16();
+  TestNewShaderRecompilerSopcLtU64();
   TestNewShaderRecompilerIrLookupMissFailsExplicitly();
   TestNewShaderRecompilerRejectsDppOn64BitCompares();
   TestPsInputCountRegisterDecode();

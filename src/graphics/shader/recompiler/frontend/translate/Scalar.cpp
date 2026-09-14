@@ -102,6 +102,9 @@ bool Translator::EmitScalar(const Decoder::Instruction& inst) {
 		case O::S_CMP_LG_U64:
 			EmitIntegerCompare(inst, IR::ValueOpcode::INotEqual64, IR::Type::U64, true, false);
 			return true;
+		case O::S_CMP_LT_U64:
+			EmitIntegerCompare(inst, IR::ValueOpcode::ULessThan64, IR::Type::U64, true, false);
+			return true;
 
 		case O::S_AND_B64:
 			return S_U64_MASK(inst, IR::ValueOpcode::LogicalAnd, IR::ValueOpcode::BitwiseAnd32,

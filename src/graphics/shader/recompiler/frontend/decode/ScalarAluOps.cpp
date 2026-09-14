@@ -74,7 +74,7 @@ constexpr OpcodeMap SOPC_OPCODE_LIST[] = {
     {0x06u, Opcode::S_CMP_EQ_U32},  {0x07u, Opcode::S_CMP_LG_U32},  {0x08u, Opcode::S_CMP_GT_U32},
     {0x09u, Opcode::S_CMP_GE_U32},  {0x0au, Opcode::S_CMP_LT_U32},  {0x0bu, Opcode::S_CMP_LE_U32},
     {0x0cu, Opcode::S_BITCMP0_B32}, {0x0du, Opcode::S_BITCMP1_B32}, {0x12u, Opcode::S_CMP_EQ_U64},
-    {0x13u, Opcode::S_CMP_LG_U64},
+    {0x13u, Opcode::S_CMP_LG_U64}, {0x16u, Opcode::S_CMP_LT_U64},
 };
 
 constexpr OpcodeMap SOPK_OPCODE_LIST[] = {
