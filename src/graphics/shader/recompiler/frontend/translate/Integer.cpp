@@ -433,7 +433,7 @@ bool Translator::S_BFE_U32(const Decoder::Instruction& inst, bool sign) {
 	return true;
 }
 
-bool Translator::S_BFE_U64(const Decoder::Instruction& inst) {
+bool Translator::S_BFE_U64(const Decoder::Instruction& inst, bool sign) {
 	const auto source = ReadU64(inst.src0);
 	const auto field  = ReadU32(inst.src1);
 	const auto offset =
@@ -443,7 +443,17 @@ bool Translator::S_BFE_U64(const Decoder::Instruction& inst) {
 	const auto available = ir.ISub(IR::U32(IR::Value(64u)), offset);
 	const auto count     = IR::U32(ir.Emit(IR::ValueOpcode::UMin32, {raw_count, available}));
 	const auto shifted   = IR::U64(ir.Emit(IR::ValueOpcode::ShiftRightLogical64, {source, offset}));
-	const auto result    = ir.Emit(IR::ValueOpcode::BitwiseAnd64, {shifted, RightMask64(count)});
+	const auto masked    = ir.Emit(IR::ValueOpcode::BitwiseAnd64, {shifted, RightMask64(count)});
+	IR::Value result     = masked;
+	if (sign) {
+		// Sign-extend from bit (count-1): shift the field up then back down
+		// arithmetically. Same select-guarded idiom as RightMask64 (a zero
+		// count yields result 0 via the mask above).
+		const auto inv = ir.ISub(IR::U32(IR::Value(64u)), count);
+		const auto up  = IR::U64(
+		    ir.Emit(IR::ValueOpcode::ShiftLeftLogical64, {IR::U64(masked), inv}));
+		result = ir.Emit(IR::ValueOpcode::ShiftRightArithmetic64, {up, inv});
+	}
 	WriteOperand(DestinationOperand(inst), result);
 	ir.SetScc(IR::U1(ir.Emit(IR::ValueOpcode::INotEqual64, {result, IR::Value(uint64_t {0})})));
 	return true;

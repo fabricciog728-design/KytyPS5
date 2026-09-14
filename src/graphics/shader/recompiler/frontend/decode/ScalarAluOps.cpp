@@ -28,7 +28,7 @@ constexpr OpcodeMap SOP2_OPCODE_LIST[] = {
     {0x24u, Opcode::S_BFM_B32},
     {0x25u, Opcode::S_BFM_B64},         {0x26u, Opcode::S_MUL_I32},
     {0x27u, Opcode::S_BFE_U32},         {0x28u, Opcode::S_BFE_I32},
-    {0x29u, Opcode::S_BFE_U64},         {0x2cu, Opcode::S_ABSDIFF_I32},
+    {0x29u, Opcode::S_BFE_U64},         {0x2au, Opcode::S_BFE_I64},         {0x2cu, Opcode::S_ABSDIFF_I32},
     {0x2eu, Opcode::S_LSHL1_ADD_U32},
     {0x2fu, Opcode::S_LSHL2_ADD_U32},   {0x30u, Opcode::S_LSHL3_ADD_U32},
     {0x31u, Opcode::S_LSHL4_ADD_U32},   {0x32u, Opcode::S_PACK_LL_B32_B16},

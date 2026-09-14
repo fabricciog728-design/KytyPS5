@@ -114,6 +114,7 @@ enum class Opcode {
 	S_BFE_U32,
 	S_BFE_I32,
 	S_BFE_U64,
+	S_BFE_I64,
 	S_BFM_B32,
 	S_BFM_B64,
 	S_CSELECT_B32,

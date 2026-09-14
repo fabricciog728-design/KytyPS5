@@ -20,7 +20,8 @@ Regra: 1 etapa por commit, port fiel da `submission` verde, CI precisa ficar ver
 | 8c | ✅ | `6b1efcd` | ISA inédito: `S_CMP_LT_U64` (SOPC 0x16) + teste standalone + correções 8a | `shader_cfg` |
 | 8d | ✅ | `3a391b9` | ISA inédito: `S_CMP_GT_U64` (SOPC 0x14, mesmo molde do 8c via `UGreaterThan64`) + teste standalone | `shader_cfg` |
 | 8e | ✅ | `0cf277a` | ISA inédito + IR novo: `S_CMP_GE_U64` (0x15) / `S_CMP_LE_U64` (0x17) com `UGreaterThanEqual64`/`ULessThanEqual64` (`CompareOrdered64` hi/lo + fold); fecha o bloco SOPC U64 | `shader_cfg` |
-| 8f | ✅ | (este commit) | ISA inédito: `S_ASHR_I64` (SOP2 0x23, verificado coluna GFX10 do Mesa; 0x0c/0x0d vazios corretos no GFX10) via `ShiftRightArithmetic64` existente + teste standalone | `shader_cfg` |
+| 8f | ✅ | `5b1644e` | ISA inédito: `S_ASHR_I64` (SOP2 0x23, verificado coluna GFX10 do Mesa; 0x0c/0x0d vazios corretos no GFX10) via `ShiftRightArithmetic64` existente + teste standalone | `shader_cfg` |
+| 8g | ✅ | (este commit) | ISA inédito: `S_BFE_I64` (SOP2 0x2a) com lowering com sinal (`shl`+`ashr` por `64-count`, `SCC!=0` mantido) + teste standalone | `shader_cfg` |
 | 9 | ⬜ | — | SBO/dynamic-state/present parkados pelo revert `f62a4c8` — **ausentes do tip da submission (vermelhos); re-lançar 1 peça por vez com sinal de CI próprio, fora deste commit** | CI por peça |
 | 10 | ⬜ | — | Observabilidade restante: hash naming, dump SPIR-V, `spirv-val` no CI (LTO release feito neste commit) | CI |
 

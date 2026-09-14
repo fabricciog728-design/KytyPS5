@@ -199,7 +199,7 @@ private:
 	IR::U64 RightMask64(IR::U32 count);
 	bool    S_BFM_B64(const Decoder::Instruction& inst);
 	bool    S_BFE_U32(const Decoder::Instruction& inst, bool sign);
-	bool    S_BFE_U64(const Decoder::Instruction& inst);
+	bool    S_BFE_U64(const Decoder::Instruction& inst, bool sign);
 	bool    V_BFE_U32(const Decoder::Instruction& inst, bool sign);
 	bool    V_BFI_B32(const Decoder::Instruction& inst);
 	bool    S_BITCMP_B32(const Decoder::Instruction& inst, bool expected);

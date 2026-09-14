@@ -4589,6 +4589,36 @@ void TestNewShaderRecompilerSop2AshrI64() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
+void TestNewShaderRecompilerSop2BfeI64() {
+  using namespace ShaderRecompiler;
+
+  // GFX10 SOP2 0x2a (Mesa aco_opcodes.py GFX10 column); signed variant of the
+  // existing S_BFE_U64 (0x29), sign-extends from bit (count-1).
+  const uint32_t shader[] = {
+      EncodeSop2(0x2a, 6, 0, 255), // s_bfe_i64 s[6:7], s[0:1], literal
+      0x00080004u,                 // offset=4, count=8
+      EncodeSopp(0x01),
+  };
+  Decoder::Instruction decoded;
+  Decoder::DecodeInstruction(shader, 0u, decoded);
+  Check(decoded.family == Decoder::Family::SOP2 &&
+            decoded.opcode == Decoder::Opcode::S_BFE_I64 &&
+            decoded.opcode_id == 0x2au && decoded.word_count == 2u &&
+            decoded.src_count == 2u,
+        "decoder rejected SOP2 S_BFE_I64 fields");
+
+  Decoder::Program program;
+  Decoder::DecodeProgram(shader, program);
+  Check(!CFG::BuildGraph(program).unsupported,
+        "SOP2 S_BFE_I64 still fails CFG construction");
+  auto result = RecompileForTest(shader, MakeCompileOptions(ShaderType::Compute));
+  Check(Common::ContainsStr(result.decoded_dump, "S_BFE_I64"),
+        "SOP2 S_BFE_I64 is missing from decoded dump");
+  Check(Common::ContainsStr(result.ir_dump, "ShiftRightArithmetic64"),
+        "S_BFE_I64 did not lower through sign-extending shift IR");
+  CheckSpirvBinaryValidates(result.spirv);
+}
+
 void TestNewShaderRecompilerSopcLeU64() {
   using namespace ShaderRecompiler;
 
@@ -13022,6 +13052,7 @@ int main() {
   TestNewShaderRecompilerSopcGeU64();
   TestNewShaderRecompilerSopcLeU64();
   TestNewShaderRecompilerSop2AshrI64();
+  TestNewShaderRecompilerSop2BfeI64();
   TestNewShaderRecompilerIrLookupMissFailsExplicitly();
   TestNewShaderRecompilerRejectsDppOn64BitCompares();
   TestPsInputCountRegisterDecode();
