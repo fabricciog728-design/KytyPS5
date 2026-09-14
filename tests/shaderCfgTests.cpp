@@ -4647,6 +4647,47 @@ void TestNewShaderRecompilerSopcLeU64() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
+void TestNewShaderRecompilerVop3EncodedVop1Converts() {
+  using namespace ShaderRecompiler;
+
+  // VOP1 0x0b/0x11-0x14 were missing their VOP3 forms (0x18b/0x191-0x194).
+  // The native VOP3 table claims nothing in 0x180-0x1ff, so these cannot
+  // collide; plain (modifier-free) forms must decode like their VOP1 twins.
+  struct Vop3Case {
+    uint32_t         word0;
+    Decoder::Opcode  opcode;
+    uint32_t         vop3;
+    uint32_t         dst;
+  };
+  const Vop3Case cases[] = {
+      {0xd18b0001u, Decoder::Opcode::V_CVT_F32_F16, 0x18bu, 1u},
+      {0xd1910002u, Decoder::Opcode::V_CVT_F32_UBYTE0, 0x191u, 2u},
+      {0xd1920003u, Decoder::Opcode::V_CVT_F32_UBYTE1, 0x192u, 3u},
+      {0xd1930004u, Decoder::Opcode::V_CVT_F32_UBYTE2, 0x193u, 4u},
+      {0xd1940005u, Decoder::Opcode::V_CVT_F32_UBYTE3, 0x194u, 5u},
+  };
+  for (const auto& entry : cases) {
+    const uint32_t words[] = {entry.word0, 0x00000007u};
+    Decoder::Instruction decoded;
+    Decoder::DecodeInstruction(words, 0u, decoded);
+    Check(decoded.family == Decoder::Family::VOP3 && decoded.opcode == entry.opcode &&
+              decoded.opcode_id == entry.vop3 && decoded.word_count == 2u &&
+              decoded.dst.kind == Decoder::OperandKind::Vgpr &&
+              decoded.dst.reg == entry.dst,
+          "VOP3-encoded VOP1 convert does not decode");
+  }
+
+  const uint32_t shader[] = {0xd18b0001u, 0x00000007u, EncodeSopp(0x01)};
+  Decoder::Program program;
+  Decoder::DecodeProgram(shader, program);
+  Check(!CFG::BuildGraph(program).unsupported,
+        "VOP3-encoded V_CVT_F32_F16 still fails CFG construction");
+  auto result = RecompileForTest(shader, MakeCompileOptions(ShaderType::Compute));
+  Check(Common::ContainsStr(result.decoded_dump, "V_CVT_F32_F16"),
+        "VOP3-encoded V_CVT_F32_F16 is missing from decoded dump");
+  CheckSpirvBinaryValidates(result.spirv);
+}
+
 void TestNewShaderRecompilerIrLookupMissFailsExplicitly() {
   namespace Decoder = ShaderRecompiler::Decoder;
   namespace CFG = ShaderRecompiler::CFG;
@@ -13051,6 +13092,7 @@ int main() {
   TestNewShaderRecompilerSopcGtU64();
   TestNewShaderRecompilerSopcGeU64();
   TestNewShaderRecompilerSopcLeU64();
+  TestNewShaderRecompilerVop3EncodedVop1Converts();
   TestNewShaderRecompilerSop2AshrI64();
   TestNewShaderRecompilerSop2BfeI64();
   TestNewShaderRecompilerIrLookupMissFailsExplicitly();
