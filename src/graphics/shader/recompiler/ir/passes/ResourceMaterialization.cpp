@@ -930,6 +930,14 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, Materialize
 		}
 	}
 	ImageRemap(next_specialization).Apply(next_snapshot.images);
+	// A single bit avoids per-image permutation growth while retaining feedback whenever an
+	// indirect table can select a descriptor that requests it.
+	next_specialization.enable_lod_stats =
+	    program.stage == ShaderType::Pixel &&
+	    std::ranges::any_of(next_snapshot.images, [](const DescriptorValue& descriptor) {
+		    return descriptor.dword_count > 5u &&
+		           (descriptor.dwords[5] & (1u << 25u)) != 0u;
+	    });
 	specialization       = std::move(next_specialization);
 	specialized_snapshot = std::move(next_snapshot);
 	return true;

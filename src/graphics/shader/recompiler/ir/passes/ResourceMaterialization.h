@@ -34,6 +34,8 @@ struct ResourceSpecialization {
 
 	std::vector<Buffer> buffers;
 	std::vector<Image>  images;
+	// Per-image counter metadata stays in the snapshot; this aggregate only selects the module.
+	bool                enable_lod_stats = false;
 
 	bool operator==(const ResourceSpecialization&) const = default;
 };

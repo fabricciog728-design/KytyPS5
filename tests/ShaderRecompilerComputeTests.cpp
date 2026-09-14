@@ -24732,7 +24732,7 @@ void CheckIndirectImageKeySwitch(bool lod_stats = false) {
   using namespace ShaderRecompiler::IR;
 
   Program program{};
-  program.stage = lod_stats ? ShaderType::Pixel : ShaderType::Compute;
+  program.stage = ShaderType::Pixel;
   program.wave_size = 32;
   program.srt_plan_complete = true;
   program.resource_tracking_complete = true;
@@ -24762,7 +24762,7 @@ void CheckIndirectImageKeySwitch(bool lod_stats = false) {
   memory.resource = 0;
   memory.sampler = 0;
   memory.dmask = 0xf;
-  memory.image_sample_flags = lod_stats ? 0u : ShaderRecompiler::Decoder::ImageSampleFlagLod;
+  memory.image_sample_flags = 0u;
   memory.image_dimension = ShaderRecompiler::Decoder::ImageDimension::Dim2D;
   memory.image_address_components = 3;
   program.memory_info.push_back(memory);
@@ -24801,11 +24801,10 @@ void CheckIndirectImageKeySwitch(bool lod_stats = false) {
   program.info.sampled_pairs.push_back({0u, 0u, 0x10f0u});
 
   AllocateBindings(program, 0, lod_stats);
-  ShaderComputeInputInfo compute{};
   ShaderPixelInputInfo pixel{};
   ShaderRecompiler::Spirv::AnalyzeProgramRequirements(program);
   auto spirv = ShaderRecompiler::Spirv::EmitProgram(program,
-      lod_stats ? ShaderStageInputInfo{.pixel = &pixel} : ShaderStageInputInfo{.compute = &compute});
+      ShaderStageInputInfo{.pixel = &pixel});
   ValidateSpirv(name, spirv);
   spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
   std::string text;
@@ -24814,14 +24813,22 @@ void CheckIndirectImageKeySwitch(bool lod_stats = false) {
   Require(name, "key switch",
           text.find("OpSwitch") != std::string::npos &&
               text.find("OpPhi") != std::string::npos &&
-              CountText(text, lod_stats ? "OpImageSampleImplicitLod" : "OpImageSampleExplicitLod") == 2 &&
+              CountText(text, "OpImageSampleImplicitLod") == 2 &&
+              CountText(text, "OpImageSampleExplicitLod") == 0 &&
               CountText(text, "OpIEqual") == 11,
           "dynamic image key did not use a compact two-sample switch");
-  if (lod_stats) {
-    Require(name, "LOD feedback", CountText(text, "OpImageQueryLod") == 2 &&
-        CountText(text, "OpAtomicUMin") == 2 && CountText(text, "OpAtomicIAdd") == 4,
-        "indirect candidates lack independent LOD feedback instrumentation");
-  }
+  const auto *lod_binding =
+      FindBinding(program.bindings, DescriptorBindingKind::LodStats);
+  Require(name, "LOD layout",
+          (program.bindings.lod_stats_count == 2) == lod_stats &&
+              (lod_binding != nullptr) == lod_stats,
+          "LOD feedback binding did not match the selected variant");
+  Require(name, "LOD feedback",
+          CountText(text, "OpImageQueryLod") == (lod_stats ? 2u : 0u) &&
+              CountText(text, "OpAtomicUMin") == (lod_stats ? 2u : 0u) &&
+              CountText(text, "OpAtomicIAdd") == (lod_stats ? 4u : 0u) &&
+              (text.find("lod_stats") != std::string::npos) == lod_stats,
+          "LOD instrumentation did not match the selected variant");
   std::printf("[host] indirect image switch LOD=%d SPIR-V valid\n", lod_stats);
 }
 

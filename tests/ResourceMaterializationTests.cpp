@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -140,6 +141,42 @@ Libs::Graphics::ShaderRecompiler::IR::ResourcePlan MixedSamplerPlan() {
   return ExtractResourcePlan(program);
 }
 
+Libs::Graphics::ShaderRecompiler::IR::ResourcePlan
+ImagePlan(Libs::Graphics::ShaderType stage, bool mip_stats,
+          uint32_t mip_stats_id = 0) {
+  using namespace Libs::Graphics;
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  Program program;
+  program.stage = stage;
+  program.srt_plan_complete = true;
+  program.resource_tracking_complete = true;
+  AddValueBlock(program);
+
+  DescriptorSource source;
+  source.dword_count = 8;
+  const std::array<uint32_t, 8> descriptor{
+      0x1000u,
+      static_cast<uint32_t>(Prospero::BufferFormat::k8_8_8_8UNorm) << 20u,
+      0u,
+      static_cast<uint32_t>(Prospero::ImageType::kColor2D) << 28u,
+      0u,
+      mip_stats ? (1u << 25u) : 0u,
+      mip_stats_id,
+      0u,
+  };
+  for (uint32_t i = 0; i < descriptor.size(); i++) {
+    source.dwords[i] = Value(descriptor[i]);
+  }
+  program.descriptor_sources.push_back(source);
+  program.info.images.push_back({
+      .source = 0,
+      .resource_class = ImageResourceClass::Sampled,
+      .numeric_class = Prospero::TextureNumericClass::Float,
+      .dimension = ShaderRecompiler::Decoder::ImageDimension::Dim2D,
+  });
+  return ExtractResourcePlan(program);
+}
+
 void TestMappedSrtUsesDirectReaderByDefault() {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   const uint32_t dword = 0x12345678;
@@ -226,11 +263,13 @@ void TestFailedMaterializationPreservesPriorStage() {
   snapshot.user_data.push_back(0xfeedbeefu);
   ResourceSpecialization specialization;
   specialization.buffers.push_back({.packed_stride = 7});
+  specialization.enable_lod_stats = true;
   Check(!MaterializeResources(plan, {}, snapshot, specialization),
         "missing runtime user data did not reject the cached stage");
   Check(snapshot.user_data == std::vector<uint32_t>{0xfeedbeefu} &&
             specialization.buffers.size() == 1 &&
-            specialization.buffers[0].packed_stride == 7,
+            specialization.buffers[0].packed_stride == 7 &&
+            specialization.enable_lod_stats,
         "failed cache materialization changed its destinations");
 }
 
@@ -246,6 +285,42 @@ void TestMixedSamplerDuplicatesTheCorrectSnapshot() {
   Check(snapshot.samplers[2] == snapshot.samplers[1] &&
             snapshot.samplers[2] != snapshot.samplers[0],
         "point sampler variant duplicated the wrong runtime descriptor");
+}
+
+void TestLodStatsFollowsMaterializedImageDescriptors() {
+  using namespace Libs::Graphics;
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  ResourceSnapshot disabled_snapshot;
+  ResourceSpecialization disabled;
+  Check(MaterializeResources(ImagePlan(ShaderType::Pixel, false), {},
+                             disabled_snapshot, disabled),
+        "disabled pixel LOD specialization failed");
+  Check(!disabled.enable_lod_stats,
+        "pixel shader without MipStatsCntEn enabled LOD instrumentation");
+
+  ResourceSnapshot enabled_snapshot;
+  ResourceSpecialization enabled;
+  Check(MaterializeResources(ImagePlan(ShaderType::Pixel, true), {},
+                             enabled_snapshot, enabled),
+        "enabled pixel LOD specialization failed");
+  Check(enabled.enable_lod_stats && enabled != disabled,
+        "MipStatsCntEn did not create an instrumented shader specialization");
+
+  ResourceSnapshot other_counter_snapshot;
+  ResourceSpecialization other_counter;
+  Check(MaterializeResources(ImagePlan(ShaderType::Pixel, true, 7), {},
+                             other_counter_snapshot, other_counter),
+        "alternate LOD counter specialization failed");
+  Check(other_counter == enabled,
+        "runtime LOD counter metadata created an unnecessary shader permutation");
+
+  ResourceSnapshot compute_snapshot;
+  ResourceSpecialization compute;
+  Check(MaterializeResources(ImagePlan(ShaderType::Compute, true), {},
+                             compute_snapshot, compute),
+        "compute LOD specialization failed");
+  Check(!compute.enable_lod_stats,
+        "LOD feedback instrumentation leaked into a compute shader");
 }
 
 void TestBdaReadPlanIntervals() {
@@ -402,6 +477,7 @@ int main() {
   TestUnbasedFlatCacheHitMaterializes();
   TestFailedMaterializationPreservesPriorStage();
   TestMixedSamplerDuplicatesTheCorrectSnapshot();
+  TestLodStatsFollowsMaterializedImageDescriptors();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }
