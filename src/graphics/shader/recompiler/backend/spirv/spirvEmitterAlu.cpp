@@ -557,6 +557,14 @@ bool EmitValueAlu(ValueEmitContext& ctx, const IR::Inst& inst) {
 			ctx.Define(inst, CompareOrdered64(state, ctx.Arg(inst, 0), ctx.Arg(inst, 1),
 			                                  OpUGreaterThan, OpUGreaterThan));
 			return true;
+		case IR::ValueOpcode::UGreaterThanEqual64:
+			ctx.Define(inst, CompareOrdered64(state, ctx.Arg(inst, 0), ctx.Arg(inst, 1),
+			                                  OpUGreaterThan, OpUGreaterThanEqual));
+			return true;
+		case IR::ValueOpcode::ULessThanEqual64:
+			ctx.Define(inst, CompareOrdered64(state, ctx.Arg(inst, 0), ctx.Arg(inst, 1),
+			                                  OpULessThan, OpULessThanEqual));
+			return true;
 		case IR::ValueOpcode::LogicalOr: return binary(OpLogicalOr, IR::Type::U1);
 		case IR::ValueOpcode::LogicalAnd: return binary(OpLogicalAnd, IR::Type::U1);
 		case IR::ValueOpcode::LogicalXor: return binary(OpLogicalNotEqual, IR::Type::U1);

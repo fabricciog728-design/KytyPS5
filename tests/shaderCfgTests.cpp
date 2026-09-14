@@ -4532,6 +4532,62 @@ void TestNewShaderRecompilerSopcGtU64() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
+void TestNewShaderRecompilerSopcGeU64() {
+  using namespace ShaderRecompiler;
+
+  const uint32_t shader[] = {
+      EncodeSopc(0x15, 0, 2), // s_cmp_ge_u64 s[0:1], s[2:3]
+      EncodeSopp(0x01),
+  };
+  Decoder::Instruction decoded;
+  Decoder::DecodeInstruction(shader, 0u, decoded);
+  Check(decoded.family == Decoder::Family::SOPC &&
+            decoded.opcode == Decoder::Opcode::S_CMP_GE_U64 &&
+            decoded.opcode_id == 0x15u && decoded.word_count == 1u &&
+            decoded.dst.kind == Decoder::OperandKind::Scc &&
+            decoded.src_count == 2u,
+        "decoder rejected SOPC S_CMP_GE_U64 fields");
+
+  Decoder::Program program;
+  Decoder::DecodeProgram(shader, program);
+  Check(!CFG::BuildGraph(program).unsupported,
+        "SOPC S_CMP_GE_U64 still fails CFG construction");
+  auto result = RecompileForTest(shader, MakeCompileOptions(ShaderType::Compute));
+  Check(Common::ContainsStr(result.decoded_dump, "S_CMP_GE_U64"),
+        "SOPC S_CMP_GE_U64 is missing from decoded dump");
+  Check(Common::ContainsStr(result.ir_dump, "UGreaterThanEqual64"),
+        "S_CMP_GE_U64 did not lower to unsigned 64-bit greater-equal IR");
+  CheckSpirvBinaryValidates(result.spirv);
+}
+
+void TestNewShaderRecompilerSopcLeU64() {
+  using namespace ShaderRecompiler;
+
+  const uint32_t shader[] = {
+      EncodeSopc(0x17, 0, 2), // s_cmp_le_u64 s[0:1], s[2:3]
+      EncodeSopp(0x01),
+  };
+  Decoder::Instruction decoded;
+  Decoder::DecodeInstruction(shader, 0u, decoded);
+  Check(decoded.family == Decoder::Family::SOPC &&
+            decoded.opcode == Decoder::Opcode::S_CMP_LE_U64 &&
+            decoded.opcode_id == 0x17u && decoded.word_count == 1u &&
+            decoded.dst.kind == Decoder::OperandKind::Scc &&
+            decoded.src_count == 2u,
+        "decoder rejected SOPC S_CMP_LE_U64 fields");
+
+  Decoder::Program program;
+  Decoder::DecodeProgram(shader, program);
+  Check(!CFG::BuildGraph(program).unsupported,
+        "SOPC S_CMP_LE_U64 still fails CFG construction");
+  auto result = RecompileForTest(shader, MakeCompileOptions(ShaderType::Compute));
+  Check(Common::ContainsStr(result.decoded_dump, "S_CMP_LE_U64"),
+        "SOPC S_CMP_LE_U64 is missing from decoded dump");
+  Check(Common::ContainsStr(result.ir_dump, "ULessThanEqual64"),
+        "S_CMP_LE_U64 did not lower to unsigned 64-bit less-equal IR");
+  CheckSpirvBinaryValidates(result.spirv);
+}
+
 void TestNewShaderRecompilerIrLookupMissFailsExplicitly() {
   namespace Decoder = ShaderRecompiler::Decoder;
   namespace CFG = ShaderRecompiler::CFG;
@@ -12934,6 +12990,8 @@ int main() {
   TestNewShaderRecompilerCapturedVopcSdwaCmpxLtU16();
   TestNewShaderRecompilerSopcLtU64();
   TestNewShaderRecompilerSopcGtU64();
+  TestNewShaderRecompilerSopcGeU64();
+  TestNewShaderRecompilerSopcLeU64();
   TestNewShaderRecompilerIrLookupMissFailsExplicitly();
   TestNewShaderRecompilerRejectsDppOn64BitCompares();
   TestPsInputCountRegisterDecode();

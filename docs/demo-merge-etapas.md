@@ -18,7 +18,8 @@ Regra: 1 etapa por commit, port fiel da `submission` verde, CI precisa ficar ver
 | 8a | ✅ | `7e51a27` | ISA: `S_MUL_HI_I32` (SOP2 0x36, re-aplica #576 derrubado pelo alinhamento) | `shader_cfg` |
 | 8b | ✅ | `afecaf9` | ISA: `V_FRACT_F16` (VOP1 0x5f) + `V_CMPX_LT_U16` (VOPC 0xb9, re-aplica #582) + filtros `--fract-f16-only`/`--cmpx-lt-u16-only` | `shader_cfg`, `shader_recompiler_compute` |
 | 8c | ✅ | `6b1efcd` | ISA inédito: `S_CMP_LT_U64` (SOPC 0x16) + teste standalone + correções 8a | `shader_cfg` |
-| 8d | ✅ | (este commit) | ISA inédito: `S_CMP_GT_U64` (SOPC 0x14, mesmo molde do 8c via `UGreaterThan64`) + teste standalone | `shader_cfg` |
+| 8d | ✅ | `3a391b9` | ISA inédito: `S_CMP_GT_U64` (SOPC 0x14, mesmo molde do 8c via `UGreaterThan64`) + teste standalone | `shader_cfg` |
+| 8e | ✅ | (este commit) | ISA inédito + IR novo: `S_CMP_GE_U64` (0x15) / `S_CMP_LE_U64` (0x17) com `UGreaterThanEqual64`/`ULessThanEqual64` (`CompareOrdered64` hi/lo + fold); fecha o bloco SOPC U64 | `shader_cfg` |
 | 9 | ⬜ | — | SBO/dynamic-state/present parkados pelo revert `f62a4c8` — **ausentes do tip da submission (vermelhos); re-lançar 1 peça por vez com sinal de CI próprio, fora deste commit** | CI por peça |
 | 10 | ⬜ | — | Observabilidade restante: hash naming, dump SPIR-V, `spirv-val` no CI (LTO release feito neste commit) | CI |
 
