@@ -6,15 +6,20 @@
 #include "common/common.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderWarmup.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/shader.h"
 
+#include <atomic>
 #include <cstddef>
 #include <filesystem>
 #include <memory>
 #include <span>
+#include <string>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <vector>
 
 namespace Libs::Graphics {
 
@@ -215,6 +220,23 @@ private:
 	                                                        m_graphics_pipelines;
 	std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> m_compute_pipelines;
 	Common::Mutex m_mutex;
+
+	// Record-then-replay shader warmup: miss-compiled shaders are recorded to
+	// disk and recompiled on a background thread at the next boot, moving the
+	// recompiler hitch from gameplay frames to loading time.
+	enum class ShaderWarmupStatus { Compiled, Retry, Dead };
+	void               StartShaderWarmup();
+	void               StopShaderWarmup();
+	void               ShaderWarmupLoop(size_t bound);
+	ShaderWarmupStatus ReplayWarmupRecord(const ShaderWarmup::Record& record,
+	                                      std::vector<uint8_t>&       code_scratch);
+
+	ShaderWarmup::Recorder    m_warmup_recorder;
+	std::thread               m_warmup_thread;
+	std::atomic_bool          m_warmup_stop {false};
+	std::atomic_bool          m_warmup_started {false};
+	std::filesystem::path     m_warmup_path;
+	std::string               m_warmup_gpu_signature;
 
 	void InitializeDriverCache();
 };

@@ -23,6 +23,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -31,6 +32,7 @@
 #include <span>
 #include <spirv-tools/libspirv.hpp>
 #include <string_view>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -118,6 +120,14 @@ bool ReadShaderRawGuestMemory(void*, uint64_t address, uint32_t* value) {
 	return true;
 }
 
+bool SafeReadShaderWarmupMemory(void*, uint64_t address, uint32_t* value) {
+	// Warmup-only reader: replays may reference guest memory that is not mapped
+	// yet (the game is still loading). Never dereference directly; a failed
+	// read makes the record skip gracefully instead of crashing boot.
+	return value != nullptr &&
+	       Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, value, sizeof(*value));
+}
+
 bool ReadShaderMemorySpan(void*, uint64_t address, uint32_t* values, uint32_t count, bool clean) {
 	return count >= 2 && count <= 16 &&
 	       Libs::LibKernel::Memory::TryReadGpuShaderSpan(address, values, count * 4u, clean);
@@ -135,6 +145,106 @@ void ReportMaterialization(const char* label, ShaderType stage, uint64_t hash,
 		     label, hash, report.dropped_candidates, report.dropped_shapes,
 		     report.dropped_summary.c_str());
 	}
+}
+
+// Snapshots a miss-compiled shader for the warmup recorder. Only plain-data
+// inputs are kept: the `stage` output member is split out (see
+// ShaderWarmup::Record) so replay never memcpys over a live std::vector.
+template <typename InputInfo>
+void RecordWarmupEntry(ShaderWarmup::Recorder* recorder, ShaderType stage,
+                       const ShaderParams& params, const InputInfo& input_info,
+                       uint32_t entry_cursor, const ShaderRecompiler::CompileOptions& options,
+                       const ShaderRecompiler::IR::ResourceSpecialization& specialization,
+                       const ShaderRecompiler::IR::CompiledShaderInfo&     compiled,
+                       std::vector<uint32_t>                              spirv) {
+	if (recorder == nullptr) {
+		return;
+	}
+	if (params.code.empty() || params.code.size() > ShaderWarmup::kMaxCodeWords ||
+	    params.user_data.size() > ShaderWarmup::kMaxUserDataWords ||
+	    params.back_code.size() > ShaderWarmup::kMaxBackCodeWords) {
+		return;
+	}
+	ShaderWarmup::Record record;
+	record.stage          = static_cast<uint8_t>(stage);
+	record.hash           = params.hash;
+	record.code_addr      = params.Base();
+	record.code_words     = static_cast<uint32_t>(params.code.size());
+	record.user_data.assign(params.user_data.begin(), params.user_data.end());
+	record.back_code.assign(params.back_code.begin(), params.back_code.end());
+	record.wave_size      = options.wave_size;
+	record.user_data_base = options.user_data_base;
+	record.scratch_dwords = options.scratch_dwords;
+	record.push_cursor    = entry_cursor;
+	if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
+		record.input_kind = ShaderWarmup::kInputVertex;
+		ShaderVertexInputInfo snapshot = input_info;
+		snapshot.stage                 = {};
+		const auto* bytes = reinterpret_cast<const uint8_t*>(&snapshot);
+		const auto* stage_begin =
+		    reinterpret_cast<const uint8_t*>(&snapshot.stage);
+		record.input_size = static_cast<uint32_t>(sizeof(snapshot));
+		record.input_head.assign(bytes, stage_begin);
+		record.input_tail.assign(stage_begin + sizeof(snapshot.stage), bytes + sizeof(snapshot));
+	} else if constexpr (std::is_same_v<InputInfo, ShaderPixelInputInfo>) {
+		record.input_kind = ShaderWarmup::kInputPixel;
+		ShaderPixelInputInfo snapshot = input_info;
+		snapshot.stage                = {};
+		const auto* bytes = reinterpret_cast<const uint8_t*>(&snapshot);
+		const auto* stage_begin =
+		    reinterpret_cast<const uint8_t*>(&snapshot.stage);
+		record.input_size = static_cast<uint32_t>(sizeof(snapshot));
+		record.input_head.assign(bytes, stage_begin);
+		record.input_tail.assign(stage_begin + sizeof(snapshot.stage), bytes + sizeof(snapshot));
+	} else {
+		static_assert(std::is_same_v<InputInfo, ShaderComputeInputInfo>);
+		record.input_kind = ShaderWarmup::kInputCompute;
+		ShaderComputeInputInfo snapshot = input_info;
+		snapshot.stage                  = {};
+		const auto* bytes = reinterpret_cast<const uint8_t*>(&snapshot);
+		const auto* stage_begin =
+		    reinterpret_cast<const uint8_t*>(&snapshot.stage);
+		record.input_size = static_cast<uint32_t>(sizeof(snapshot));
+		record.input_head.assign(bytes, stage_begin);
+		record.input_tail.assign(stage_begin + sizeof(snapshot.stage), bytes + sizeof(snapshot));
+	}
+	// Phase 2: persist the compiled permutation. Oversized variants are dropped
+	// (the shader itself is still recorded for phase-1 replay).
+	if (!spirv.empty() && spirv.size() <= ShaderWarmup::kMaxSpirvWords) {
+		ShaderWarmup::SpvVariant variant;
+		ShaderWarmup::EncodeSpecialization(specialization, variant.spec);
+		ShaderWarmup::EncodeCompiledInfo(compiled, variant.info);
+		variant.spirv = std::move(spirv);
+		if (variant.spec.size() <= ShaderWarmup::kMaxSpecBytes &&
+		    variant.info.size() <= ShaderWarmup::kMaxInfoBytes) {
+			record.variants.push_back(std::move(variant));
+		}
+	}
+	recorder->Add(std::move(record));
+}
+
+// Restores a recorded input snapshot into a fresh struct. Only the plain-data
+// regions around the `stage` output member are copied, so replay never memcpys
+// over a live std::vector. Returns false when the sizes do not match.
+template <typename InputInfo>
+bool RestoreWarmupInput(const ShaderWarmup::Record& record, InputInfo& info) {
+	if (record.input_size != sizeof(InputInfo)) {
+		return false;
+	}
+	const size_t stage_offset = record.input_head.size();
+	const size_t stage_size   = sizeof(info.stage);
+	if (stage_offset + stage_size + record.input_tail.size() != sizeof(InputInfo)) {
+		return false;
+	}
+	auto* bytes = reinterpret_cast<uint8_t*>(&info);
+	if (!record.input_head.empty()) {
+		std::memcpy(bytes, record.input_head.data(), record.input_head.size());
+	}
+	if (!record.input_tail.empty()) {
+		std::memcpy(bytes + stage_offset + stage_size, record.input_tail.data(),
+		            record.input_tail.size());
+	}
+	return true;
 }
 
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
@@ -270,7 +380,8 @@ struct PipelineCache::ProgramCache {
 	                               const ShaderRecompiler::CompileOptions&      options,
 	                               ShaderRecompiler::TranslateResult            translated,
 	                               ShaderRecompiler::IR::ResourceSpecialization specialization,
-	                               uint32_t push_data_start_dword) {
+	                               uint32_t push_data_start_dword,
+	                               std::vector<uint32_t>* spirv_out = nullptr) {
 		const char* stage_name = nullptr;
 		switch (options.stage) {
 			case ShaderType::Vertex: stage_name = "vs"; break;
@@ -298,6 +409,11 @@ struct PipelineCache::ProgramCache {
 		EXIT_IF(module == nullptr);
 		SetVulkanObjectNameF(device, module, "Kyty.Shader.{}[0x{:016x}]", stage_name,
 		                     options.shader_hash);
+		if (spirv_out != nullptr) {
+			// Phase 2 warmup persistence: keep a copy for the on-disk cache.
+			// Miss-compile only, so the copy is noise next to translation.
+			*spirv_out = result.spirv;
+		}
 		if (options.dump_ir) {
 			if (!options.early_dump) {
 				LOGF("%s decoded RDNA2:\n%s", options.dump_label, result.decoded_dump.c_str());
@@ -315,7 +431,7 @@ struct PipelineCache::ProgramCache {
 
 	template <typename InputInfo>
 	ShaderProgram Get(const ShaderParams& params, InputInfo& input_info,
-	                  uint32_t& push_data_cursor) {
+	                  uint32_t& push_data_cursor, bool* warmup_soft_fail = nullptr) {
 		ShaderType stage;
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 			stage = input_info.mesh.threads_num[0] != 0 ? ShaderType::Mesh : ShaderType::Vertex;
@@ -339,13 +455,16 @@ struct PipelineCache::ProgramCache {
 		lookup_key.user_data_count = static_cast<uint32_t>(params.user_data.size());
 		lookup_key.code_size       = static_cast<uint32_t>(params.code.size());
 		BuildStageStaticKey(input_info, lookup_key.static_state);
+		// Entry value before AdvancePushData mutates it below; recorded for replay.
+		const uint32_t entry_cursor = push_data_cursor;
 		auto                                         entry = programs.find(lookup_key);
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
+		const bool                                   is_warmup = warmup_soft_fail != nullptr;
 		const ShaderRecompiler::IR::SrtRuntime       input_runtime {
 		          .user_data                  = params.user_data,
 		          .shader_base                = params.Base(),
-		          .read_memory                = ReadShaderRawGuestMemory,
+		          .read_memory                = is_warmup ? SafeReadShaderWarmupMemory : ReadShaderRawGuestMemory,
 		          .read_specialization_memory = ReadShaderGuestMemory,
 		          .sync_memory                = SyncShaderGuestMemory,
 		          .try_read_memory_span       = ReadShaderMemorySpan,
@@ -354,10 +473,14 @@ struct PipelineCache::ProgramCache {
 		const auto& runtime = observed_runtime.Get();
 		ShaderRecompiler::IR::MaterializeReport report;
 		if (entry != programs.end()) {
-			ReportMaterialization(label, stage, params.hash, report,
-			                      ShaderRecompiler::IR::MaterializeResources(
-			                          entry->second.resource_plan, runtime, resources,
-			                          specialization, &report));
+			const bool materialized = ShaderRecompiler::IR::MaterializeResources(
+			    entry->second.resource_plan, runtime, resources, specialization, &report);
+			if (!materialized && is_warmup) {
+				// Stale record (guest memory not ready yet): skip gracefully.
+				*warmup_soft_fail = true;
+				return ShaderProgram {};
+			}
+			ReportMaterialization(label, stage, params.hash, report, materialized);
 			if (const auto permutation = std::ranges::find_if(
 			        entry->second.permutations, [&](const Permutation& candidate) {
 				        const auto& layout = candidate.program.bindings;
@@ -384,7 +507,6 @@ struct PipelineCache::ProgramCache {
 		}
 		ShaderRecompiler::CompileOptions options;
 		options.stage       = stage;
-		options.enable_lod_stats = true;
 		options.shader_hash = params.hash;
 		options.user_data   = params.user_data;
 		options.back_code      = params.back_code;
@@ -406,14 +528,27 @@ struct PipelineCache::ProgramCache {
 		auto translated = ShaderRecompiler::TranslateProgram(params.code, options);
 		if (entry == programs.end()) {
 			auto resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
-			ReportMaterialization(label, stage, params.hash, report,
-			                      ShaderRecompiler::IR::MaterializeResources(
-			                          resource_plan, runtime, resources, specialization, &report));
+			const bool materialized = ShaderRecompiler::IR::MaterializeResources(
+			    resource_plan, runtime, resources, specialization, &report);
+			if (!materialized && is_warmup) {
+				// Stale record (guest memory not ready yet): skip gracefully.
+				*warmup_soft_fail = true;
+				return ShaderProgram {};
+			}
+			ReportMaterialization(label, stage, params.hash, report, materialized);
 			entry = programs.try_emplace(lookup_key, std::move(resource_plan)).first;
 		}
+		std::vector<uint32_t> warm_spirv;
 		entry->second.permutations.push_back(CompilePermutation(
-		    params, options, std::move(translated), std::move(specialization), push_data_cursor));
+		    params, options, std::move(translated), std::move(specialization), push_data_cursor,
+		    is_warmup ? nullptr : &warm_spirv));
 		const auto& permutation = entry->second.permutations.back();
+		// Live draws only: warmup replays already exist on disk.
+		if (!is_warmup) {
+			RecordWarmupEntry(warmup_recorder, stage, params, input_info, entry_cursor, options,
+			                  permutation.specialization, permutation.program,
+			                  std::move(warm_spirv));
+		}
 		input_info.stage = {.program = &permutation.program, .resources = std::move(resources)};
 		permutation.program.bindings.AdvancePushData(push_data_cursor);
 
@@ -430,8 +565,139 @@ struct PipelineCache::ProgramCache {
 		return permutation.handle;
 	}
 
+	struct WarmedPermutation {
+		ShaderRecompiler::IR::ResourceSpecialization specialization;
+		ShaderRecompiler::IR::CompiledShaderInfo     program;
+		vk::ShaderModule                             module = nullptr;
+	};
+
+	// Inserts precompiled permutations from the phase-2 disk cache. Caller holds
+	// the PipelineCache lock (same discipline as Get). Modules for duplicates
+	// are destroyed here; returns the number inserted.
+	size_t InsertWarmed(ShaderType stage, uint64_t hash, uint32_t user_data_count,
+	                    uint32_t code_size, const std::vector<uint32_t>& static_state,
+	                    ShaderRecompiler::IR::ResourcePlan plan,
+	                    std::vector<WarmedPermutation>     perms) {
+		ProgramKey key;
+		key.stage           = stage;
+		key.hash            = hash;
+		key.user_data_count = user_data_count;
+		key.code_size       = code_size;
+		key.static_state    = static_state;
+		auto entry          = programs.find(key);
+		if (entry == programs.end()) {
+			entry = programs.try_emplace(std::move(key), std::move(plan)).first;
+		}
+		size_t inserted = 0;
+		for (auto& warmed : perms) {
+			const auto duplicate = std::ranges::find_if(
+			    entry->second.permutations, [&](const Permutation& candidate) {
+				    return candidate.specialization == warmed.specialization;
+			    });
+			if (duplicate != entry->second.permutations.end()) {
+				device.destroyShaderModule(warmed.module, nullptr);
+				continue;
+			}
+			Permutation stored;
+			stored.specialization = std::move(warmed.specialization);
+			stored.program        = std::move(warmed.program);
+			stored.handle         = ShaderProgram {.id = ++next_shader_id, .module = warmed.module};
+			entry->second.permutations.push_back(std::move(stored));
+			++inserted;
+		}
+		return inserted;
+	}
+
+	// Phase-2 replay worker: translates the recorded shader (pure CPU, no lock
+	// needed), recreates modules from stored SPIR-V, then inserts everything
+	// under the caller's lock. Returns false when the record can never replay
+	// (corrupt); residency misses are reported by the caller, not here.
+	template <typename InputInfo>
+	bool WarmInsertVariants(Common::Mutex& mutex, GraphicContext& graphics,
+	                        const ShaderWarmup::Record& record, std::span<const uint32_t> code) {
+		InputInfo info;
+		if (!RestoreWarmupInput(record, info)) {
+			return false;
+		}
+		ShaderType stage;
+		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
+			stage = info.mesh.threads_num[0] != 0 ? ShaderType::Mesh : ShaderType::Vertex;
+			if (stage == ShaderType::Mesh) {
+				info.mesh.host_subgroup_size = graphics.subgroup_size;
+			}
+		} else if constexpr (std::is_same_v<InputInfo, ShaderPixelInputInfo>) {
+			stage = ShaderType::Pixel;
+			info.lod_stats_subgroup = graphics.fragment_subgroup_reduction;
+		} else {
+			static_assert(std::is_same_v<InputInfo, ShaderComputeInputInfo>);
+			stage                     = ShaderType::Compute;
+			info.host_subgroup_size = graphics.SupportsComputeWave64() ? 64u : 32u;
+		}
+		std::vector<uint32_t> static_state;
+		BuildStageStaticKey(info, static_state);
+		ShaderParams params;
+		params.code      = code;
+		params.user_data = record.user_data;
+		params.hash      = record.hash;
+		std::vector<uint32_t> back_code = record.back_code;
+		params.back_code                = std::span<const uint32_t>(back_code);
+		ShaderStageInputInfo stage_input {};
+		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
+			stage_input.vertex = &info;
+		} else if constexpr (std::is_same_v<InputInfo, ShaderPixelInputInfo>) {
+			stage_input.pixel = &info;
+		} else {
+			stage_input.compute = &info;
+		}
+		ShaderRecompiler::CompileOptions options;
+		options.stage           = stage;
+		options.shader_hash     = params.hash;
+		options.user_data       = params.user_data;
+		options.back_code       = params.back_code;
+		options.dump_ir         = false;
+		options.early_dump      = false;
+		options.dump_label      = "ShaderWarmup";
+		options.input_info      = stage_input;
+		options.wave_size       = record.wave_size;
+		options.user_data_base  = record.user_data_base;
+		options.scratch_dwords  = record.scratch_dwords;
+		auto translated         = ShaderRecompiler::TranslateProgram(params.code, options);
+		auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+		std::vector<WarmedPermutation> perms;
+		for (const auto& stored : record.variants) {
+			WarmedPermutation ready;
+			if (stored.spirv.empty() ||
+			    !ShaderWarmup::DecodeSpecialization(stored.spec.data(), stored.spec.size(),
+			                                        ready.specialization) ||
+			    !ShaderWarmup::DecodeCompiledInfo(stored.info.data(), stored.info.size(),
+			                                      ready.program)) {
+				continue;
+			}
+			vk::ShaderModuleCreateInfo create_info {};
+			create_info.codeSize = stored.spirv.size() * sizeof(uint32_t);
+			create_info.pCode    = stored.spirv.data();
+			vk::ShaderModule module = nullptr;
+			if (device.createShaderModule(&create_info, nullptr, &module) !=
+			        vk::Result::eSuccess ||
+			    module == nullptr) {
+				continue;
+			}
+			SetVulkanObjectNameF(device, module, "Kyty.Warmup.[0x{:016x}]", record.hash);
+			ready.module = module;
+			perms.push_back(std::move(ready));
+		}
+		if (perms.empty()) {
+			return false;
+		}
+		Common::LockGuard lock(mutex);
+		InsertWarmed(stage, record.hash, static_cast<uint32_t>(record.user_data.size()),
+		             record.code_words, static_state, std::move(plan), std::move(perms));
+		return true;
+	}
+
 	explicit ProgramCache(vk::Device device): device(device) {
 		lookup_key.static_state.reserve(MaxStaticKeyWords);
+		WarmUp();
 	}
 	~ProgramCache() {
 		for (const auto& [key, entry]: programs) {
@@ -446,15 +712,32 @@ struct PipelineCache::ProgramCache {
 	ProgramKey                                                  lookup_key;
 	vk::Device                                                  device;
 	uint64_t                                                    next_shader_id = 0;
+	// Owned by PipelineCache; set once before any draw. Null disables recording.
+	ShaderWarmup::Recorder* warmup_recorder = nullptr;
+
+	// Pre-size for a typical game session up front: growing (rehashing) this
+	// map mid-frame stalls draws once thousands of shader variants accumulate.
+	void WarmUp() { programs.reserve(2048); }
 };
 
 PipelineCache::PipelineCache(GraphicContext& graphics)
     : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics.device)) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	m_graphics_pipelines.reserve(512);
+	m_compute_pipelines.reserve(256);
 	InitializeDriverCache();
+	const auto title_id = PipelineCacheTitleId();
+	if (!title_id.empty()) {
+		m_warmup_path = std::filesystem::path("_ShaderCache") / (title_id + ".bin");
+		m_warmup_gpu_signature =
+		    DriverCacheSignature(m_graphics.GetPhysicalDeviceProperties());
+		m_warmup_recorder.Configure(m_warmup_path, KYTY_GIT_REVISION, m_warmup_gpu_signature);
+	}
+	m_program_cache->warmup_recorder = &m_warmup_recorder;
 }
 
 PipelineCache::~PipelineCache() {
+	StopShaderWarmup();
 	Save();
 	auto destroy = [this](const auto& pipelines) {
 		for (const auto& [key, pipeline]: pipelines) {
@@ -474,24 +757,31 @@ PipelineCache::~PipelineCache() {
 void PipelineCache::InitializeDriverCache() {
 	const auto title_id = PipelineCacheTitleId();
 	if (title_id.empty()) {
+		PipelineCacheLog("Vulkan pipeline cache: disabled (no title id in param.sfo)");
 		return;
 	}
-	if (KYTY_BUILD != KYTY_BUILD_RELEASE) {
-		PipelineCacheLog("Vulkan pipeline cache: disabled (non-Release build)");
-		return;
-	}
+	// Developers iterating on dirty/non-Release builds used to pay the full
+	// driver compile cost every launch. Route them to a separate dev cache
+	// instead of disabling it: the driver still validates the payload against
+	// its own UUID and the shaders themselves, so stale entries simply miss.
 	const std::string_view git_hash     = KYTY_GIT_HASH;
 	const std::string_view git_revision = KYTY_GIT_REVISION;
-	if (git_hash == "unknown" || git_revision == "unknown") {
-		PipelineCacheLog("Vulkan pipeline cache: disabled (unknown git revision)");
-		return;
-	}
-	if (git_hash.ends_with("-dirty")) {
-		PipelineCacheLog("Vulkan pipeline cache: disabled (dirty build)");
-		return;
+	std::string_view       dev_reason;
+	if (KYTY_BUILD != KYTY_BUILD_RELEASE) {
+		dev_reason = "non-Release build";
+	} else if (git_hash == "unknown" || git_revision == "unknown") {
+		dev_reason = "unknown git revision";
+	} else if (git_hash.ends_with("-dirty")) {
+		dev_reason = "dirty build";
 	}
 
-	m_driver_cache_path     = std::filesystem::path("_PipelineCache") / (title_id + ".bin");
+	m_driver_cache_path =
+	    std::filesystem::path("_PipelineCache") / (title_id + (dev_reason.empty() ? ".bin" : ".dev.bin"));
+	if (!dev_reason.empty()) {
+		PipelineCacheLog("Vulkan pipeline cache: using DEV cache {} ({}, persistent cache "
+		                 "needs a clean Release build)",
+		                 Common::PathToString(m_driver_cache_path), dev_reason);
+	}
 	const auto path         = Common::PathToString(m_driver_cache_path);
 	const bool cache_exists = Common::File::IsFileExisting(m_driver_cache_path);
 	if (cache_exists) {
@@ -559,6 +849,7 @@ void PipelineCache::InitializeDriverCache() {
 
 void PipelineCache::Save() {
 	Common::LockGuard lock(m_mutex);
+	m_warmup_recorder.Flush();
 	if (m_driver_cache == nullptr) {
 		return;
 	}
@@ -621,6 +912,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
     std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping, bool pixel_active,
     ShaderVertexInputInfo& vertex_info, ShaderPixelInputInfo& pixel_info) {
+	StartShaderWarmup();
 	const auto vertex_params = PrepareProgram(vertex_regs, context, user_config, vertex_info);
 	const bool mesh_active   = vertex_info.mesh.threads_num[0] != 0;
 	if (mesh_active) {
@@ -674,6 +966,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs,
                                                const HW::ShaderRegisters&   sh,
                                                ShaderComputeInputInfo&      input_info) {
+	StartShaderWarmup();
 	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	const auto        params      = PrepareProgram(regs, sh, input_info);
 	Common::LockGuard lock(m_mutex);
@@ -683,6 +976,203 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
 
 bool PipelineStaticParameters::operator==(const PipelineStaticParameters& other) const noexcept {
 	return std::memcmp(this, &other, sizeof(*this)) == 0;
+}
+
+void PipelineCache::StartShaderWarmup() {
+	if (m_warmup_started.exchange(true)) {
+		return;
+	}
+	if (m_warmup_path.empty()) {
+		return;
+	}
+	// Load inside the worker so the first draw of the session pays no IO hitch.
+	m_warmup_thread = std::thread([this] {
+		std::vector<ShaderWarmup::Record> loaded;
+		if (!ShaderWarmup::LoadFile(m_warmup_path, KYTY_GIT_REVISION, m_warmup_gpu_signature,
+		                            loaded) ||
+		    loaded.empty()) {
+			return;
+		}
+		size_t bound = 0;
+		{
+			Common::LockGuard lock(m_mutex);
+			bound = m_warmup_recorder.Seed(std::move(loaded));
+		}
+		ShaderWarmupLoop(bound);
+	});
+}
+
+void PipelineCache::StopShaderWarmup() {
+	m_warmup_stop.store(true);
+	if (m_warmup_thread.joinable()) {
+		m_warmup_thread.join();
+	}
+}
+
+void PipelineCache::ShaderWarmupLoop(size_t bound) {
+	PipelineCacheLog("Shader warmup: precompiling {} recorded shaders", bound);
+	std::vector<uint8_t> code_scratch;
+	std::vector<char>    done(bound, 0);
+	size_t               remaining = bound;
+	size_t               compiled  = 0;
+	size_t               dead      = 0;
+	while (remaining != 0 && !m_warmup_stop.load(std::memory_order_relaxed)) {
+		size_t progressed = 0;
+		for (size_t i = 0; i < bound; ++i) {
+			if (m_warmup_stop.load(std::memory_order_relaxed)) {
+				break;
+			}
+			if (done[i] != 0) {
+				continue;
+			}
+			// Fetch under the cache lock; the copy is then processed lock-free
+			// (retry passes re-fetch, picking up merged variants).
+			ShaderWarmup::Record record;
+			{
+				Common::LockGuard lock(m_mutex);
+				if (!m_warmup_recorder.FetchCopy(i, record)) {
+					done[i] = 1;
+					--remaining;
+					++dead;
+					continue;
+				}
+			}
+			const auto status = ReplayWarmupRecord(record, code_scratch);
+			if (status == ShaderWarmupStatus::Retry) {
+				continue;
+			}
+			done[i] = 1;
+			--remaining;
+			++progressed;
+			if (status == ShaderWarmupStatus::Compiled) {
+				++compiled;
+				if (compiled % 64 == 0) {
+					PipelineCacheLog("Shader warmup: {}/{} compiled", compiled, bound);
+				}
+			} else {
+				++dead;
+			}
+			// Yield the program-cache lock to real draws between records.
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		if (progressed == 0 && remaining != 0 &&
+		    !m_warmup_stop.load(std::memory_order_relaxed)) {
+			// Nothing resident yet (the game is still loading its assets);
+			// back off instead of re-probing every record in a hot loop.
+			for (int nap = 0; nap < 20 && !m_warmup_stop.load(std::memory_order_relaxed); ++nap) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			}
+		}
+	}
+	PipelineCacheLog("Shader warmup: finished {}/{} compiled ({} skipped, {} pending)", compiled,
+	                 bound, dead, remaining);
+}
+
+PipelineCache::ShaderWarmupStatus PipelineCache::ReplayWarmupRecord(
+    const ShaderWarmup::Record& record, std::vector<uint8_t>& code_scratch) {
+	using namespace ShaderWarmup;
+	if (record.code_words == 0 || record.code_words > kMaxCodeWords ||
+	    record.user_data.size() > kMaxUserDataWords ||
+	    record.back_code.size() > kMaxBackCodeWords || record.code_addr == 0 ||
+	    record.input_kind > kInputCompute || record.input_size == 0 ||
+	    record.input_size > kMaxInputBytes) {
+		return ShaderWarmupStatus::Dead;
+	}
+	const uint64_t code_bytes = static_cast<uint64_t>(record.code_words) * 4u;
+	if (record.code_addr + code_bytes < record.code_addr) {
+		return ShaderWarmupStatus::Dead;
+	}
+	// Prove the shader is resident at its recorded guest address before doing
+	// any work. Unmapped (not loaded yet) or mismatched (different game build)
+	// records are skipped; unmapped ones are retried while the game loads.
+	code_scratch.resize(static_cast<size_t>(code_bytes));
+	if (!LibKernel::Memory::TryReadGpuCleanBacking(record.code_addr, code_scratch.data(),
+	                                               code_bytes)) {
+		return ShaderWarmupStatus::Retry;
+	}
+	if (XXH3_64bits(code_scratch.data(), static_cast<size_t>(code_bytes)) != record.hash) {
+		return ShaderWarmupStatus::Dead;
+	}
+	ShaderParams params;
+	params.code = std::span<const uint32_t>(
+	    reinterpret_cast<const uint32_t*>(static_cast<uintptr_t>(record.code_addr)),
+	    record.code_words);
+	if (!record.variants.empty()) {
+		// Phase 2: translate for the plan, then insert stored compilations.
+		// No guest descriptor reads, so nothing here can go stale.
+		const std::span<const uint32_t> code = params.code;
+		switch (record.input_kind) {
+			case ShaderWarmup::kInputVertex:
+				return m_program_cache
+				           ->WarmInsertVariants<ShaderVertexInputInfo>(m_mutex, m_graphics, record,
+				                                                      code)
+				           ? ShaderWarmupStatus::Compiled
+				           : ShaderWarmupStatus::Dead;
+			case ShaderWarmup::kInputPixel:
+				return m_program_cache
+				           ->WarmInsertVariants<ShaderPixelInputInfo>(m_mutex, m_graphics, record,
+				                                                     code)
+				           ? ShaderWarmupStatus::Compiled
+				           : ShaderWarmupStatus::Dead;
+			case ShaderWarmup::kInputCompute:
+				return m_program_cache
+				           ->WarmInsertVariants<ShaderComputeInputInfo>(m_mutex, m_graphics, record,
+				                                                       code)
+				           ? ShaderWarmupStatus::Compiled
+				           : ShaderWarmupStatus::Dead;
+			default: return ShaderWarmupStatus::Dead;
+		}
+	}
+	params.user_data = record.user_data;
+	params.hash      = record.hash;
+	std::vector<uint32_t> back_code = record.back_code;
+	params.back_code                = std::span<const uint32_t>(back_code);
+	uint32_t cursor                 = record.push_cursor;
+	bool     soft_failed            = false;
+	ShaderProgram handle;
+	{
+		// Same lock discipline as live draws: Get mutates the shared program
+		// map, lookup key and recorder. The phase-2 path above never takes it
+		// during translation, only for the final insert.
+		Common::LockGuard lock(m_mutex);
+		switch (record.input_kind) {
+		case ShaderWarmup::kInputVertex: {
+			ShaderVertexInputInfo info;
+			if (!RestoreWarmupInput(record, info)) {
+				return ShaderWarmupStatus::Dead;
+			}
+			if (info.mesh.threads_num[0] != 0) {
+				info.mesh.host_subgroup_size = m_graphics.subgroup_size;
+			}
+			handle = m_program_cache->Get(params, info, cursor, &soft_failed);
+			break;
+		}
+		case ShaderWarmup::kInputPixel: {
+			ShaderPixelInputInfo info;
+			if (!RestoreWarmupInput(record, info)) {
+				return ShaderWarmupStatus::Dead;
+			}
+			info.lod_stats_subgroup = m_graphics.fragment_subgroup_reduction;
+			handle = m_program_cache->Get(params, info, cursor, &soft_failed);
+			break;
+		}
+		case ShaderWarmup::kInputCompute: {
+			ShaderComputeInputInfo info;
+			if (!RestoreWarmupInput(record, info)) {
+				return ShaderWarmupStatus::Dead;
+			}
+			info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
+			handle = m_program_cache->Get(params, info, cursor, &soft_failed);
+			break;
+		}
+		default: return ShaderWarmupStatus::Dead;
+	}
+	}
+	if (soft_failed || !handle) {
+		// Guest descriptor memory not ready yet; retry on a later pass.
+		return ShaderWarmupStatus::Retry;
+	}
+	return ShaderWarmupStatus::Compiled;
 }
 
 PipelineCache::Pipeline& PipelineCache::CreateGraphicsPipeline(
