@@ -4560,6 +4560,35 @@ void TestNewShaderRecompilerSopcGeU64() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
+void TestNewShaderRecompilerSop2AshrI64() {
+  using namespace ShaderRecompiler;
+
+  // GFX10 SOP2 0x23 (Mesa aco_opcodes.py GFX10 column); 0x0c/0x0d are
+  // correctly empty on GFX10 (GFX8-only numbering).
+  const uint32_t shader[] = {
+      EncodeSop2(0x23, 4, 0, 1), // s_ashr_i64 s[4:5], s[0:1], s1
+      EncodeSopp(0x01),
+  };
+  Decoder::Instruction decoded;
+  Decoder::DecodeInstruction(shader, 0u, decoded);
+  Check(decoded.family == Decoder::Family::SOP2 &&
+            decoded.opcode == Decoder::Opcode::S_ASHR_I64 &&
+            decoded.opcode_id == 0x23u && decoded.word_count == 1u &&
+            decoded.src_count == 2u,
+        "decoder rejected SOP2 S_ASHR_I64 fields");
+
+  Decoder::Program program;
+  Decoder::DecodeProgram(shader, program);
+  Check(!CFG::BuildGraph(program).unsupported,
+        "SOP2 S_ASHR_I64 still fails CFG construction");
+  auto result = RecompileForTest(shader, MakeCompileOptions(ShaderType::Compute));
+  Check(Common::ContainsStr(result.decoded_dump, "S_ASHR_I64"),
+        "SOP2 S_ASHR_I64 is missing from decoded dump");
+  Check(Common::ContainsStr(result.ir_dump, "ShiftRightArithmetic64"),
+        "S_ASHR_I64 did not lower to 64-bit arithmetic shift IR");
+  CheckSpirvBinaryValidates(result.spirv);
+}
+
 void TestNewShaderRecompilerSopcLeU64() {
   using namespace ShaderRecompiler;
 
@@ -12992,6 +13021,7 @@ int main() {
   TestNewShaderRecompilerSopcGtU64();
   TestNewShaderRecompilerSopcGeU64();
   TestNewShaderRecompilerSopcLeU64();
+  TestNewShaderRecompilerSop2AshrI64();
   TestNewShaderRecompilerIrLookupMissFailsExplicitly();
   TestNewShaderRecompilerRejectsDppOn64BitCompares();
   TestPsInputCountRegisterDecode();

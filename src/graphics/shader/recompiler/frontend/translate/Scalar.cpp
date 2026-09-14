@@ -186,6 +186,9 @@ bool Translator::EmitScalar(const Decoder::Instruction& inst) {
 		case O::S_ASHR_I32:
 			return SimpleInteger(inst, IR::ValueOpcode::ShiftRightArithmetic32, IR::Type::U32,
 			                     false, true, true);
+		case O::S_ASHR_I64:
+			return SimpleInteger(inst, IR::ValueOpcode::ShiftRightArithmetic64, IR::Type::U64,
+			                     false, false, true);
 		case O::S_LSHL_B64:
 			return SimpleInteger(inst, IR::ValueOpcode::ShiftLeftLogical64, IR::Type::U64, false,
 			                     false, true);
