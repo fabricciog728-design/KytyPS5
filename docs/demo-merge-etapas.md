@@ -29,8 +29,8 @@ Regra: 1 etapa por commit, port fiel da `submission` verde, CI precisa ficar ver
 
 | # | Status | Commit | Escopo | Validação |
 |---|--------|--------|--------|-----------|
-| P3 | ✅ | (este commit) | Depth `load/store` → `DontCare` quando o attachment está ligado mas intocado: sem side effects PS (`DB_SHADER_CONTROL`), sem writes (`AttachmentWriteAspects` vazio, cobre clears guest/meta), e p/ load também sem testes (depth/bounds/stencil), sem clears e sem sampling (inclui o draw atual). Bind, layout, HTile e chave de pipeline intactos; `RenderAttachment::{load,store}_discard_aspects` entram na chave do render pass | build 3 OS + validation layers/RenderDoc (frames idênticos, `DontCare` no pass) |
-| P2 | ⬜ | — | Download assíncrono de texturas (fila + thread de readback) | boot + cutscenes |
+| P3 | ✅ | `b882465` | Depth `load/store` → `DontCare` quando o attachment está ligado mas intocado: sem side effects PS (`DB_SHADER_CONTROL`), sem writes (`AttachmentWriteAspects` vazio, cobre clears guest/meta), e p/ load também sem testes (depth/bounds/stencil), sem clears e sem sampling (inclui o draw atual). Bind, layout, HTile e chave de pipeline intactos; `RenderAttachment::{load,store}_discard_aspects` entram na chave do render pass | build 3 OS + validation layers/RenderDoc (frames idênticos, `DontCare` no pass) |
+| P2 | ✅ | (este commit) | Readback: early-out p/ range degenerada (`address/size==0`, antes crashava no `EXIT` do copy) + `Map` fail-soft (retry no próximo passe). Redesenho async completo avaliado e recusado sem runtime: o worker de prioridade + `WriteBacking` diferido já existem e qualquer mudança no modelo de sync exige teste em boot real | build 3 OS |
 | P1 | ⬜ | — | Compilação assíncrona de pipelines em runtime (worker + fallback) | stutter em gameplay |
 
 ## Dependência crítica (aprendida no CI)

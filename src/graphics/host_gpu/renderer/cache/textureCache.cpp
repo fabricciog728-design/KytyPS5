@@ -1892,6 +1892,13 @@ bool TextureCache::TryDownloadImage(ImageId id) {
 	if (image.depth_id) {
 		return false;
 	}
+	// Degenerate images (placeholder/empty ranges) cannot be downloaded:
+	// a zero size would trip the copy helper's contract, and address zero is
+	// never a valid backing store. Both callers already treat false as skip.
+	const auto early_range = image.info.data;
+	if (early_range.address == 0 || early_range.size == 0) {
+		return false;
+	}
 	auto plan = BuildDownload(image);
 	if (!plan.valid || !SafeToDownload(image)) {
 		return false;
@@ -1901,7 +1908,11 @@ bool TextureCache::TryDownloadImage(ImageId id) {
 	auto [mapped, offset] =
 	    download.Map(range.size, std::max<uint64_t>(image.info.bytes_per_block, 4));
 	if (mapped == nullptr) {
-		EXIT("TextureCache: failed to map reusable download buffer\n");
+		// Fail soft like every other early-out above: the GC sweep and the
+		// download pump both skip on false, and retry on the next pass once
+		// ring space frees up. Aborting the emulator on transient pressure
+		// was never intended.
+		return false;
 	}
 	download.Commit();
 	if (!LibKernel::Memory::TryReadBacking(range.address, mapped, range.size)) {
