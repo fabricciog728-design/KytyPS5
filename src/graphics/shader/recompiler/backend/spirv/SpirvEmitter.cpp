@@ -4,8 +4,11 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
+#include "graphics/shader/recompiler/ir/passes/FunctionLdsLayout.h"
+
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv {
 
@@ -73,6 +76,12 @@ void ValidateNativeProgram(const IR::Program& program) {
 	}
 	if (uses_gds) {
 		Expect(Kind::Gds);
+	}
+	if (program.bindings.lod_stats_count != 0) {
+		if (program.stage != ShaderType::Pixel || program.bindings.lod_stats_count != program.info.images.size()) {
+			Fail(program, "LOD feedback metadata does not match pixel images");
+		}
+		Expect(Kind::LodStats);
 	}
 	if (program.info.uses_dma) {
 		Expect(Kind::BdaPagetable);
@@ -183,8 +192,10 @@ void ValidateNativeProgram(const IR::Program& program) {
 
 } // namespace
 
-Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program& program) {
-	SpirvRequirements requirements {};
+void AnalyzeProgramRequirements(IR::Program& program) {
+	program.spirv_requirements.reset();
+	IR::SpirvRequirements requirements {};
+	const auto MarkBallot = [&] { requirements.subgroup_ballot = true; };
 	for (const auto* block: program.blocks) {
 		for (const auto& inst: *block) {
 			if (IR::BufferAccessOf(inst.GetOpcode()) == IR::BufferAccess::Atomic &&
@@ -240,18 +251,18 @@ Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program
 				}
 				if (shared_access == IR::SharedAccess::Append ||
 				    shared_access == IR::SharedAccess::Consume) {
-					requirements.subgroup_ballot              = true;
+					MarkBallot();
 					requirements.subgroup_shuffle             = true;
 					requirements.subgroup_local_invocation_id = true;
 				}
 			}
 			switch (inst.GetOpcode()) {
 				case IR::ValueOpcode::Ballot:
-				case IR::ValueOpcode::AnyLane: requirements.subgroup_ballot = true; break;
+				case IR::ValueOpcode::AnyLane: MarkBallot(); break;
 				case IR::ValueOpcode::DppMoveU32:
 				case IR::ValueOpcode::ReadFirstLane:
 				case IR::ValueOpcode::ReadLane: {
-					requirements.subgroup_ballot  = true;
+					MarkBallot();
 					requirements.subgroup_shuffle = true;
 					if (inst.GetOpcode() == IR::ValueOpcode::DppMoveU32) {
 						requirements.subgroup_local_invocation_id = true;
@@ -260,26 +271,25 @@ Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program
 				}
 				case IR::ValueOpcode::DppUpdateU32:
 				case IR::ValueOpcode::WriteLane: {
-					requirements.subgroup_ballot              = true;
+					MarkBallot();
 					requirements.subgroup_local_invocation_id = true;
 					break;
 				}
 				case IR::ValueOpcode::Permlane16U32: {
-					requirements.subgroup_ballot              = true;
+					MarkBallot();
 					requirements.subgroup_shuffle             = true;
 					requirements.subgroup_local_invocation_id = true;
 					break;
 				}
 				case IR::ValueOpcode::SwizzleU32:
 				case IR::ValueOpcode::BpermuteU32: {
-					requirements.subgroup_ballot              = true;
+					MarkBallot();
 					requirements.subgroup_shuffle             = true;
 					requirements.subgroup_local_invocation_id = true;
 					break;
 				}
 				case IR::ValueOpcode::LaneId:
-					requirements.subgroup_local_invocation_id |=
-					    program.stage != ShaderType::TessellationControl;
+					requirements.subgroup_local_invocation_id = true;
 					break;
 				case IR::ValueOpcode::ImageQueryLod: requirements.compute_derivatives = true; break;
 				case IR::ValueOpcode::ImageGatherRaw:
@@ -300,7 +310,7 @@ Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program
 			}
 		}
 	}
-	return requirements;
+	program.spirv_requirements.emplace(requirements);
 }
 
 std::vector<uint32_t> EmitProgram(const IR::Program& program,
@@ -308,29 +318,45 @@ std::vector<uint32_t> EmitProgram(const IR::Program& program,
 	using namespace Emitter;
 
 	if (program.stage != ShaderType::Compute && program.stage != ShaderType::Vertex &&
-	    program.stage != ShaderType::Pixel && program.stage != ShaderType::Mesh &&
-	    program.stage != ShaderType::Local && program.stage != ShaderType::TessellationControl &&
-	    program.stage != ShaderType::TessellationEvaluation) {
-		Fail(program, "binary SPIR-V emitter received an unsupported shader stage");
+	    program.stage != ShaderType::Pixel && program.stage != ShaderType::Mesh) {
+		Fail(program, "binary SPIR-V emitter supports compute, vertex, and pixel shaders");
 	}
 	if (!program.srt_plan_complete || !program.resource_tracking_complete ||
-	    !program.shader_info_complete || !program.binding_layout_complete) {
+	    !program.shader_info_complete || !program.binding_layout_complete ||
+	    !program.spirv_requirements.has_value()) {
 		Fail(program, "SPIR-V emitter requires a fully planned native shader program");
 	}
 	ValidateNativeProgram(program);
 	IR::ValidateProgram(program, true);
 	EmitterState state(program, input_info);
+	state.stage     = program.stage;
+	state.lod_stats_subgroup = program.bindings.lod_stats_count != 0 &&
+	    input_info.pixel != nullptr && input_info.pixel->lod_stats_subgroup;
+
 	const auto* workgroup = ShaderWorkgroupInput(program.stage, input_info);
 	state.lane_count =
 	    workgroup != nullptr && program.wave_size == 64u && workgroup->host_subgroup_size == 32u
 	        ? 2u
 	        : 1u;
+	const auto function_lds = IR::PlanFunctionLdsLayout(program);
+	state.function_lds_slots = function_lds.slots;
+	state.compact_lds_dwords = function_lds.dwords;
+	state.inputs.reserve(program.info.inputs.size());
+	state.outputs.reserve(program.info.outputs.size());
+	state.interface_variables.reserve(program.info.inputs.size() + program.info.outputs.size());
+	CopyProgramInputsAndOutputs(state, program);
+	AllocateInputVariables(state);
+	AllocateOutputVariables(state);
 	DefineModule(state);
 	EmitProgram(state);
-	state.builder.AddEntryPoint(ExecutionModelForStage(state.program.stage), state.main_func,
-	                            "main", state.interface_variables);
+	state.builder.AddEntryPoint(ExecutionModelForStage(state.stage), state.main_func, "main",
+	                            state.interface_variables);
 
-	return state.builder.Build();
+	auto binary = state.builder.Build();
+	if (binary.empty()) {
+		Fail(program, "SPIR-V builder returned an empty module");
+	}
+	return binary;
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv
