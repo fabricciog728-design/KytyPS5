@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/render.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
@@ -25,9 +26,29 @@ bool CommandBuffer::IsInvalid() const {
 
 vk::CommandBuffer CommandBuffer::Handle() const {
 	EXIT_IF(IsInvalid());
+	if (m_compute_access_pending) {
+		ShaderAccessBarrier(m_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		m_compute_access_pending = false;
+	}
 	return m_buffer;
 }
 
+vk::CommandBuffer CommandBuffer::ChainHandle() const {
+	EXIT_IF(IsInvalid() || m_rendering);
+	return m_buffer;
+}
+
+void CommandBuffer::ContinueComputeChain() const {
+	EXIT_IF(IsInvalid() || m_rendering);
+	m_compute_access_pending = true;
+}
+
+vk::CommandBuffer CommandBuffer::HandleForFullBarrier() const {
+	EXIT_IF(IsInvalid());
+	// The caller records a full AllCommands memory dependency immediately.
+	m_compute_access_pending = false;
+	return m_buffer;
+}
 void CommandBuffer::Begin() {
 	EXIT_IF(m_rendering || IsInvalid());
 	auto buffer = Handle();
@@ -61,11 +82,11 @@ void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0,
 }
 
 void CommandBuffer::BeginRendering(const RenderState& state) const {
+	EXIT_IF(state.width == 0 || state.height == 0 || state.num_layers == 0 ||
+	        state.num_color_attachments > RENDER_COLOR_ATTACHMENTS_MAX);
 	if (m_rendering && m_render_state == state) {
 		return;
 	}
-	EXIT_IF(state.width == 0 || state.height == 0 || state.num_layers == 0 ||
-	        state.num_color_attachments > RENDER_COLOR_ATTACHMENTS_MAX);
 	EndRendering();
 
 	std::array<vk::RenderingAttachmentInfo, RENDER_COLOR_ATTACHMENTS_MAX> colors {};

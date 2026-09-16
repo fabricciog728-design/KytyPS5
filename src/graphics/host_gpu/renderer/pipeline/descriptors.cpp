@@ -1,6 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 
-#include "common/alignment.h"
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/file.h"
@@ -67,7 +66,8 @@ vk::DescriptorType NativeDescriptorType(BindingKind kind) {
 		case BindingKind::BdaPagetable:
 		case BindingKind::FaultBuffer:
 		case BindingKind::FlattenedSrt:
-		case BindingKind::ShaderData: return vk::DescriptorType::eStorageBuffer;
+		case BindingKind::ShaderData:
+		case BindingKind::LodStats: return vk::DescriptorType::eStorageBuffer;
 		case BindingKind::Count: EXIT("invalid native descriptor binding kind");
 	}
 	EXIT("invalid native descriptor binding kind");
@@ -140,11 +140,16 @@ NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource
 	}
 	auto [buffer, offset] = context.GetBufferCache().ObtainBuffer(address, size, resource.written,
 	                                                              resource.formatted, id);
-	const auto aligned_offset = Common::AlignDown(offset, alignment);
+	const auto aligned_offset = offset - offset % alignment;
 	const auto adjustment     = offset - aligned_offset;
 	const auto max_range      = graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange;
-	if (adjustment % sizeof(uint32_t) != 0 || adjustment >= 256 || size > max_range - adjustment) {
-		EXIT("storage buffer offset adjustment is unsupported\n");
+	if ((resource.atomic && adjustment % sizeof(uint32_t) != 0) ||
+	    adjustment >= 256 || size > max_range - adjustment) {
+		EXIT("storage buffer offset adjustment is unsupported: stage=%s slot=%u "
+		     "guest=0x%016" PRIx64 " size=0x%" PRIx64 " offset=0x%" PRIx64
+		     " alignment=0x%" PRIx64 " adjustment=0x%" PRIx64 " max=0x%" PRIx64 "\n",
+		     ShaderStageResourceName(stage), slot, address, size, offset,
+		     static_cast<uint64_t>(alignment), adjustment, static_cast<uint64_t>(max_range));
 	}
 	buffer_offset = static_cast<uint32_t>(adjustment);
 	const vk::DescriptorBufferInfo result {buffer->Handle(), aligned_offset, size + adjustment};
@@ -162,6 +167,34 @@ NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource
 	    "Kyty.{}.StorageBuffer[slot={} guest=0x{:016x} size=0x{:x} access={} formatted={}]",
 	    ShaderStageResourceName(stage), slot, address, size, access, resource.formatted);
 	return result;
+}
+
+static bool IsSupportedSampledColorResource(const ShaderRecompiler::IR::ImageResource& resource) {
+	bool supported_dimension = false;
+	switch (resource.dimension) {
+		case ShaderRecompiler::Decoder::ImageDimension::Dim1D:
+		case ShaderRecompiler::Decoder::ImageDimension::Dim1DArray:
+		case ShaderRecompiler::Decoder::ImageDimension::Dim2D:
+		case ShaderRecompiler::Decoder::ImageDimension::Dim2DArray:
+		case ShaderRecompiler::Decoder::ImageDimension::Dim2DMsaa:
+		case ShaderRecompiler::Decoder::ImageDimension::Dim2DMsaaArray:
+			supported_dimension = true;
+			break;
+		default: break;
+	}
+	return resource.resource_class == ShaderRecompiler::IR::ImageResourceClass::Sampled &&
+	       resource.numeric_class != Prospero::TextureNumericClass::Unsupported &&
+	       supported_dimension && resource.mip_mode == ShaderRecompiler::IR::ImageMipMode::None &&
+	       resource.read && !resource.written && !resource.atomic && !resource.depth_compare;
+}
+
+bool IsSupportedSampledVideoOutView(const ShaderRecompiler::IR::ImageResource& resource,
+                                    const ShaderTextureResource& descriptor, const Image& image) {
+	return image.usage.video_out && image.info.resources.layers == 1 &&
+	       IsSupportedSampledColorResource(resource) &&
+	       resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2D &&
+	       descriptor.Type() == Prospero::ImageType::kColor2D && descriptor.Depth() == 0 &&
+	       descriptor.BaseArray5() == 0;
 }
 
 bool IsSupportedDepthTextureEncoding(const ShaderTextureResource& descriptor, bool r128) {
@@ -752,6 +785,13 @@ static vk::DescriptorBufferInfo NativeUpload(RenderContext&            context,
 	return {buffer.Handle(), offset, data.size_bytes()};
 }
 
+void RenderExecutor::TrackImageBinding(ImageId id) {
+	EXIT_IF(m_context.GetTextureCache().m_slot_images.try_get(id) == nullptr);
+	if (std::ranges::find(m_bound_images, id) == m_bound_images.end()) {
+		m_bound_images.push_back(id);
+	}
+}
+
 void RenderExecutor::BindImage(ImageId id, bool storage) {
 	auto& image = m_context.GetTextureCache().GetImage(id);
 	if (image.info.data.Empty()) {
@@ -762,13 +802,13 @@ void RenderExecutor::BindImage(ImageId id, bool storage) {
 	}
 	image.binding.is_bound = true;
 	image.binding.shader_write |= storage;
-	m_bound_images.push_back(id);
+	TrackImageBinding(id);
 }
 
 void RenderExecutor::BindRenderTarget(ImageId id) {
 	auto& image             = m_context.GetTextureCache().GetImage(id);
 	image.binding.is_target = true;
-	m_bound_images.push_back(id);
+	TrackImageBinding(id);
 }
 
 void RenderExecutor::ResetBindings() {
@@ -821,7 +861,10 @@ void RenderExecutor::FindBuffers(PreparedBindings& prepared) {
 	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
 		auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[i]);
 		const auto address = descriptor.Base48();
-		const auto requested_size = descriptor.GetSize();
+		const auto stride  = descriptor.Stride();
+		const auto records = descriptor.NumRecords();
+		// The descriptor has a 14-bit stride and 32-bit record count, so the product fits u64.
+		const auto requested_size = stride != 0 ? static_cast<uint64_t>(stride) * records : records;
 		if (address == 0 || requested_size == 0) {
 			prepared.buffer_sources.push_back({});
 			continue;
@@ -844,6 +887,12 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	EXIT_IF(prepared.shader_data.size() != layout.ShaderDataDwords());
 	std::fill(prepared.shader_data.begin() + layout.memory_offset_dword,
 	          prepared.shader_data.end(), 0);
+	for (uint32_t i = 0; i < layout.lod_stats_count; ++i) {
+		const auto desc = DecodeNativeDescriptor<ShaderTextureResource>(snapshot.images[i]);
+		prepared.shader_data[layout.LodStatsDword() + i] = desc.MipStatsCntEn()
+		    ? (0x80000000u | desc.MipStatsCntId() | (uint32_t(desc.BaseLevel()) << 8u) |
+		       (uint32_t(desc.MinLodWarn5()) << 12u)) : 0u;
+	}
 	auto pack_memory_offset = [&](uint32_t index, uint32_t offset) {
 		const auto dword = layout.memory_offset_dword + index / 4u;
 		const auto shift = (index % 4u) * 8u;
@@ -931,7 +980,12 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 		uses_dma |= stage->runtime->program->info.uses_dma;
 	}
 	if (uses_dma) {
-		m_context.PrepareBda();
+		// FPS fast path: reserve only the proven BDA read ranges when the DMA stages have
+		// bounded read plans; PrepareBdaBindings falls back to a full preparation otherwise.
+		PrepareBdaBindings(*stages[0], stages.size() > 1 ? stages[1] : nullptr);
+		for (size_t i = 2; i < stages.size(); i++) {
+			PrepareBdaBindings(*stages[i]);
+		}
 	}
 	for (auto* stage: stages) {
 		RebindImages(*stage);
@@ -958,12 +1012,28 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 	}
 }
 
+void RenderExecutor::PrepareBdaBindings(const PreparedBindings& first, const PreparedBindings* second) {
+	const bool first_dma = first.runtime->program->info.uses_dma;
+	const bool second_dma = second && second->runtime->program->info.uses_dma;
+	if (!first_dma && !second_dma) return;
+	std::vector<GuestRange> first_ranges, second_ranges;
+	const bool bounded = (!first_dma || ShaderRecompiler::IR::EvaluateBdaReadPlan(
+	    first.runtime->program->bda_read_plan, first.runtime->resources, first_ranges)) &&
+	    (!second_dma || ShaderRecompiler::IR::EvaluateBdaReadPlan(
+	    second->runtime->program->bda_read_plan, second->runtime->resources, second_ranges));
+	if (bounded) {
+		first_ranges.insert(first_ranges.end(), second_ranges.begin(), second_ranges.end());
+		if (m_context.GetGpuResources().PrepareBdaReadRanges(first_ranges)) return;
+	}
+	m_context.GetGpuResources().PrepareBda();
+}
+
 void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
                                     vk::PipelineBindPoint              pipeline_bind_point,
                                     const PipelineCache::Pipeline&     pipeline,
-                                    std::span<PreparedBindings* const> prepared_bindings) {
+                                    std::span<PreparedBindings* const> prepared_bindings, bool compute_chain) {
 	KYTY_PROFILER_FUNCTION();
-	auto   vk_buffer        = buffer.Handle();
+	auto   vk_buffer        = compute_chain ? buffer.ChainHandle() : buffer.Handle();
 	size_t descriptor_count = 0;
 	size_t write_count      = 0;
 	ShaderRecompiler::IR::PushData push_data;
@@ -1095,6 +1165,11 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 							m_descriptor_buffers.push_back(view);
 						}
 						break;
+					case BindingKind::LodStats: {
+						const auto* buffer = m_context.GetBufferCache().GetLodStatsBuffer();
+						m_descriptor_buffers.emplace_back(buffer->Handle(), 0, buffer->Size());
+						break;
+					}
 					case BindingKind::BdaPagetable:
 					case BindingKind::FaultBuffer: {
 						auto&       cache      = m_context.GetBufferCache();

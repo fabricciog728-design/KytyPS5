@@ -1,3 +1,4 @@
+#include "graphics/host_gpu/renderer/pipeline/shaderReadObserver.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 
 #include "common/assert.h"
@@ -24,6 +25,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <fmt/format.h>
 #include <limits>
 #include <span>
@@ -99,6 +101,21 @@ bool ReadShaderGuestMemory(void*, uint64_t address, uint32_t* value) {
 
 bool SyncShaderGuestMemory(void*, uint64_t address, uint64_t size) {
 	return Libs::LibKernel::Memory::SyncGpuCleanBacking(address, size);
+}
+
+bool ReadShaderRawGuestMemory(void*, uint64_t address, uint32_t* value) {
+	// A GPU-written neighbour may protect a clean descriptor on the same page.
+	// Reading its checked backing alias avoids an unnecessary GPU drain. Dirty,
+	// unmapped and untracked addresses retain the original load/fault behavior.
+	if (!Libs::LibKernel::Memory::TryReadGpuCleanBackingOnWatchedPage(address, value,
+	                                                                  sizeof(*value)))
+		std::memcpy(value, reinterpret_cast<const void*>(address), sizeof(*value));
+	return true;
+}
+
+bool ReadShaderMemorySpan(void*, uint64_t address, uint32_t* values, uint32_t count, bool clean) {
+	return count >= 2 && count <= 16 &&
+	       Libs::LibKernel::Memory::TryReadGpuShaderSpan(address, values, count * 4u, clean);
 }
 
 void ReportMaterialization(const char* label, ShaderType stage, uint64_t hash,
@@ -179,6 +196,10 @@ bool ValidateShaderSpirv(const char* label, uint64_t shader_hash,
 	if (tools.Validate(spirv)) {
 		return true;
 	}
+	// Fatal validation diagnostics must survive silent shader/printf settings.
+	std::fprintf(stderr, "%s SPIR-V validation failed hash=0x%016" PRIx64 ":\n%s",
+	             label, shader_hash, messages.c_str());
+	std::fflush(stderr);
 	spvtools::SpirvTools disassembler(SPV_ENV_VULKAN_1_2);
 	std::string          text;
 	disassembler.Disassemble(spirv, &text,
@@ -214,12 +235,12 @@ struct PipelineCache::ProgramCache {
 
 	struct SourceEntry {
 		explicit SourceEntry(ShaderRecompiler::IR::ResourcePlan plan)
-		    : resource_plan(std::move(plan)) {
-			permutations.reserve(8);
-		}
+		    : resource_plan(std::move(plan)) {}
 
 		ShaderRecompiler::IR::ResourcePlan resource_plan;
-		std::vector<Permutation>           permutations;
+		// ShaderStageRuntime keeps a pointer into a compiled permutation. Later
+		// specializations of the same source must not invalidate an earlier draw.
+		std::deque<Permutation> permutations;
 	};
 
 	struct ProgramKeyHash {
@@ -271,6 +292,10 @@ struct PipelineCache::ProgramCache {
 		SetVulkanObjectNameF(device, module, "Kyty.Shader.{}[0x{:016x}]", stage_name,
 		                     options.shader_hash);
 		if (options.dump_ir) {
+			if (!options.early_dump) {
+				LOGF("%s decoded RDNA2:\n%s", options.dump_label, result.decoded_dump.c_str());
+				LOGF("%s IR:\n%s", options.dump_label, result.ir_dump.c_str());
+			}
 			LOGF("%s SPIR-V words=%" PRIu64 " wave_size=%u\n", options.dump_label,
 			     static_cast<uint64_t>(result.spirv.size()), options.wave_size);
 		}
@@ -295,12 +320,12 @@ struct PipelineCache::ProgramCache {
 		}
 		const char* label = nullptr;
 		switch (stage) {
-			case ShaderType::Vertex: label = "ShaderRecompiler VS"; break;
-			case ShaderType::Mesh: label = "ShaderRecompiler MS"; break;
-			case ShaderType::Local: label = "ShaderRecompiler LS"; break;
-			case ShaderType::TessellationControl: label = "ShaderRecompiler HS"; break;
-			case ShaderType::TessellationEvaluation: label = "ShaderRecompiler DS"; break;
-			case ShaderType::Pixel: label = "ShaderRecompiler PS"; break;
+		case ShaderType::Vertex: label = "ShaderRecompiler VS"; break;
+		case ShaderType::Mesh: label = "ShaderRecompiler MS"; break;
+		case ShaderType::Local: label = "ShaderRecompiler LS"; break;
+		case ShaderType::TessellationControl: label = "ShaderRecompiler HS"; break;
+		case ShaderType::TessellationEvaluation: label = "ShaderRecompiler DS"; break;
+		case ShaderType::Pixel: label = "ShaderRecompiler PS"; break;
 			case ShaderType::Compute: label = "ShaderRecompiler CS"; break;
 			default: EXIT("invalid pipeline shader stage\n");
 		}
@@ -313,12 +338,16 @@ struct PipelineCache::ProgramCache {
 		auto                                         entry = programs.find(lookup_key);
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
-		const ShaderRecompiler::IR::SrtRuntime       runtime {
-		    .user_data                  = params.user_data,
-		    .shader_base                = params.Base(),
-		    .read_specialization_memory = ReadShaderGuestMemory,
-		    .sync_memory                = SyncShaderGuestMemory,
-		};
+		const ShaderRecompiler::IR::SrtRuntime       input_runtime {
+		          .user_data                  = params.user_data,
+		          .shader_base                = params.Base(),
+		          .read_memory                = ReadShaderRawGuestMemory,
+		          .read_specialization_memory = ReadShaderGuestMemory,
+		          .sync_memory                = SyncShaderGuestMemory,
+		          .try_read_memory_span       = ReadShaderMemorySpan,
+        };
+		ShaderReadObserver::Runtime observed_runtime(input_runtime);
+		const auto& runtime = observed_runtime.Get();
 		ShaderRecompiler::IR::MaterializeReport report;
 		if (entry != programs.end()) {
 			ReportMaterialization(label, stage, params.hash, report,
@@ -351,14 +380,15 @@ struct PipelineCache::ProgramCache {
 		}
 		ShaderRecompiler::CompileOptions options;
 		options.stage       = stage;
+		options.enable_lod_stats = true;
 		options.shader_hash = params.hash;
 		options.user_data   = params.user_data;
 		options.back_code      = params.back_code;
-		options.dump_ir     = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
+		options.dump_ir     = Config::GetShaderLogDirection() != Config::ShaderLogDirection::Silent;
 		options.early_dump  = options.dump_ir;
 		options.dump_label  = label;
 		options.input_info  = stage_input;
-
+		options.scratch_dwords = input_info.scratch_size_dwords;
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 			options.user_data_base = 8;
 			if (stage == ShaderType::Mesh || stage == ShaderType::TessellationControl) {
@@ -638,6 +668,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	    mesh_active ? ShaderRecompiler::IR::PushData::MeshDrawDwordCount : 0;
 	GraphicsPrograms  result;
 	if (pixel_active) {
+		pixel_info.lod_stats_subgroup = m_graphics.fragment_subgroup_reduction;
 		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor);
 	}
 	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
@@ -660,7 +691,7 @@ bool PipelineStaticParameters::operator==(const PipelineStaticParameters& other)
 	return std::memcmp(this, &other, sizeof(*this)) == 0;
 }
 
-PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
+PipelineCache::Pipeline& PipelineCache::CreateGraphicsPipeline(
     std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
     std::span<const ShaderVertexInputInfo> vertex_info, CommandBuffer& command,
     const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
@@ -704,16 +735,6 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 			EXIT("mixed color attachment sample counts are unsupported: %u and %u\n",
 			     attachment_samples, colors[i].desc.info.samples);
 		}
-		const auto& rt                        = ctx.GetRenderTarget(colors[i].target_slot);
-		const auto& bc                        = ctx.GetBlendControl(colors[i].target_slot);
-		static_params.color_srcblend[i]       = bc.color_srcblend;
-		static_params.color_comb_fcn[i]       = bc.color_comb_fcn;
-		static_params.color_destblend[i]      = bc.color_destblend;
-		static_params.alpha_srcblend[i]       = bc.alpha_srcblend;
-		static_params.alpha_comb_fcn[i]       = bc.alpha_comb_fcn;
-		static_params.alpha_destblend[i]      = bc.alpha_destblend;
-		static_params.separate_alpha_blend[i] = bc.separate_alpha_blend;
-		static_params.blend_enable[i]         = bc.enable && !rt.info.blend_bypass;
 	}
 	const bool with_depth =
 	    depth.desc.view_info.format != vk::Format::eUndefined && static_cast<bool>(depth.image_id);
@@ -771,6 +792,19 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	static_params.polygon_mode =
 	    ResolvePolygonMode(mc, static_params.cull_front, static_params.cull_back);
 
+	for (uint32_t i = 0; i < color_count; i++) {
+		const auto& rt                        = ctx.GetRenderTarget(colors[i].target_slot);
+		const auto& bc                        = ctx.GetBlendControl(colors[i].target_slot);
+		static_params.color_srcblend[i]       = bc.color_srcblend;
+		static_params.color_comb_fcn[i]       = bc.color_comb_fcn;
+		static_params.color_destblend[i]      = bc.color_destblend;
+		static_params.alpha_srcblend[i]       = bc.alpha_srcblend;
+		static_params.alpha_comb_fcn[i]       = bc.alpha_comb_fcn;
+		static_params.alpha_destblend[i]      = bc.alpha_destblend;
+		static_params.separate_alpha_blend[i] = bc.separate_alpha_blend;
+		static_params.blend_enable[i]         = bc.enable;
+		static_params.blend_bypass[i]         = rt.info.blend_bypass;
+	}
 	if (vs_input_info.stage.program->stage != ShaderType::Mesh) {
 		EXIT_IF(vs_input_info.buffers_num < 0 ||
 		        vs_input_info.buffers_num > ShaderVertexInputInfo::RES_MAX ||
@@ -828,8 +862,8 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 }
 
 PipelineCache::Pipeline&
-PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
-                                  const ShaderProgram&          compute_program) {
+PipelineCache::CreateComputePipeline(const ShaderComputeInputInfo& input_info,
+                                     const ShaderProgram&          compute_program) {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Compute)", profiler::colors::RedA100);
 
 	EXIT_IF(!compute_program);

@@ -84,23 +84,28 @@ public:
 	KYTY_CLASS_NO_COPY(RegionManager);
 
 	[[nodiscard]] uint64_t GetCpuAddr() const { return m_cpu_addr; }
-	template <DirtySource source>
+	[[nodiscard]] uint64_t CpuModificationEpoch() const {
+		return m_cpu_epoch.load(std::memory_order_acquire);
+	}
+
+	template <DirtySource source, bool all = false>
 	[[nodiscard]] bool IsModified(uint64_t offset, uint64_t size) const {
 		const auto [start, end] = GetPageRange(m_cpu_addr + offset, size);
 		const auto& bits        = GetBits<source>();
-		return RegionBits(bits, start, end).Any();
+		if constexpr (all) return bits.AllInRange(start, end);
+		return bits.AnyInRange(start, end);
 	}
 
 	template <DirtySource source, bool enable>
 	void ChangeState(uint64_t vaddr, uint64_t size) {
 		const auto [start, end] = GetPageRange(vaddr, size);
 		if constexpr (source == DirtySource::Cpu && enable) {
-			if (RegionBits(m_gpu_dirty, start, end).Any()) {
+			if (m_gpu_dirty.AnyInRange(start, end)) {
 				EXIT("CPU dirty state conflicts with GPU dirty state\n");
 			}
 		}
 		if constexpr (source == DirtySource::Gpu && enable) {
-			if (RegionBits(m_cpu_dirty, start, end).Any()) {
+			if (m_cpu_dirty.AnyInRange(start, end)) {
 				EXIT("GPU dirty state conflicts with CPU dirty state\n");
 			}
 		}
@@ -111,43 +116,62 @@ public:
 			bits.UnsetRange(start, end);
 		}
 		if constexpr (source == DirtySource::Cpu) {
-			UpdateProtection<!enable, false>();
+			if constexpr (enable) {
+				// Invalidate cached clean proofs before another CPU thread can write
+				// through the relaxed host protection. A cache miss takes this lock.
+				m_cpu_epoch.fetch_add(1, std::memory_order_release);
+			}
+			UpdateCpuProtection<!enable>();
 		} else {
-			UpdateProtection<enable, true>();
+			UpdateGpuProtection<enable>();
 		}
 	}
 
 	template <DirtySource source, bool clear, typename Func>
 	void ForEachModifiedRange(uint64_t vaddr, uint64_t size, Func&& func) {
 		const auto [start, end] = GetPageRange(vaddr, size);
-		auto&      bits         = GetBits<source>();
-		RegionBits mask(bits, start, end);
+		if (!GetBits<source>().AnyInRange(start, end)) return;
+		RegionBits mask(GetBits<source>(), start, end);
 		if constexpr (clear) {
-			bits.UnsetRange(start, end);
-			if constexpr (source == DirtySource::Cpu) {
-				UpdateProtection<true, false>();
-			} else {
-				UpdateProtection<false, true>();
-			}
+			GetBits<source>().UnsetRange(start, end);
 		}
-		for (const auto [first, last]: mask) {
-			func(m_cpu_addr + first * TRACKER_PAGE_SIZE, (last - first) * TRACKER_PAGE_SIZE);
+		if constexpr (source == DirtySource::Cpu && clear) {
+			UpdateCpuProtection<true>();
+			ForEachRange(mask, std::forward<Func>(func));
+			return;
 		}
+		if constexpr (source == DirtySource::Gpu && clear) {
+			UpdateGpuProtection<false>();
+		}
+		ForEachRange(mask, std::forward<Func>(func));
 	}
 
 	TrackingSpinLock lock;
 
 private:
-	template <bool track, bool is_read>
-	void UpdateProtection() {
-		const auto protection = is_read ? ~m_gpu_dirty : m_cpu_dirty;
-		auto&      previous   = is_read ? m_readable : m_writable;
-		auto       mask       = protection ^ previous;
+	template <bool track>
+	void UpdateCpuProtection() {
+		auto mask  = m_cpu_dirty ^ m_writable;
+		m_writable = m_cpu_dirty;
 		if (mask.None()) {
 			return;
 		}
-		previous = protection;
-		m_page_manager.UpdatePageWatchersForRegion<track, is_read>(m_cpu_addr, mask);
+		m_page_manager.UpdatePageWatchersForRegion<track>(m_cpu_addr, mask);
+	}
+
+	template <bool track>
+	void UpdateGpuProtection() {
+		auto readable = ~m_gpu_dirty;
+		auto mask     = readable ^ m_readable;
+		m_readable    = readable;
+		if (mask.None()) {
+			return;
+		}
+		if constexpr (track) {
+			m_page_manager.UpdatePageWatchersForRegion<true, true>(m_cpu_addr, mask);
+		} else {
+			m_page_manager.UpdatePageWatchersForRegion<false, true>(m_cpu_addr, mask);
+		}
 	}
 
 	template <DirtySource source>
@@ -178,8 +202,16 @@ private:
 		        static_cast<size_t>((offset + size + TRACKER_PAGE_SIZE - 1) / TRACKER_PAGE_SIZE)};
 	}
 
+	template <typename Func>
+	void ForEachRange(const RegionBits& bits, Func&& func) const {
+		for (const auto [start, end]: bits) {
+			func(m_cpu_addr + start * TRACKER_PAGE_SIZE, (end - start) * TRACKER_PAGE_SIZE);
+		}
+	}
+
 	PageManager& m_page_manager;
 	uint64_t     m_cpu_addr = 0;
+	std::atomic<uint64_t> m_cpu_epoch {1};
 	RegionBits   m_cpu_dirty;
 	RegionBits   m_gpu_dirty;
 	RegionBits   m_writable;

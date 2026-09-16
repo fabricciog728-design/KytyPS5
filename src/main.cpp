@@ -51,7 +51,7 @@ static void PrintUsage() {
 	         Config::DEFAULT_USER_ID);
 	::printf("  --mic <name>                        Capture from this microphone; omit for silence.\n");
 	::printf(
-	    "  --present-mode <value>               Fifo, Mailbox, or Immediate. Default: Mailbox.\n");
+	    "  --present-mode <value>               Fifo, Mailbox, or Immediate. Default: Fifo.\n");
 	::printf(
 	    "  --gpu <index>                        Vulkan physical device index. Default: auto.\n");
 	::printf("  --fullscreen                         Run in borderless desktop fullscreen.\n");
@@ -70,7 +70,7 @@ static void PrintUsage() {
 	::printf("  --graphics-debug-dump <true|false>   Enable graphics debug dumps.\n");
 	::printf("  --printf-direction <value>           Silent, Console, or File.\n");
 	::printf("  --printf-output-file <path>          Guest printf output file.\n");
-	::printf("  --profile                            Enable the Tracy profiler.\n");
+	::printf("  --profiler-direction <value>         None or Network.\n");
 	::printf("  --spirv-debug-printf <true|false>    Enable SPIR-V debug printf.\n");
 	::printf(
 	    "  --readback-linear-images <true|false> Read back writable linear images on submit.\n");
@@ -170,11 +170,6 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 
 		if (arg == "--playgo-hack") {
 			options.config.playgo_hack_enabled = true;
-			continue;
-		}
-
-		if (arg == "--profile") {
-			options.config.profiler_enabled = true;
 			continue;
 		}
 
@@ -306,6 +301,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--printf-output-file") {
 			options.config.printf_output_file = value;
+		} else if (arg == "--profiler-direction") {
+			if (!ParseEnum(value, options.config.profiler_direction)) {
+				::printf("invalid profiler direction: %s\n", value.c_str());
+				return false;
+			}
 		} else if (arg == "--spirv-debug-printf") {
 			if (!ParseBool(value, options.config.spirv_debug_printf_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());

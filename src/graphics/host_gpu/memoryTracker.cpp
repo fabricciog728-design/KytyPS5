@@ -1,6 +1,5 @@
 #include "graphics/host_gpu/memoryTracker.h"
 
-#include "common/alignment.h"
 #include "common/assert.h"
 
 namespace Libs::Graphics {
@@ -9,6 +8,9 @@ static_assert(std::atomic<void*>::is_always_lock_free);
 
 MemoryTracker::MemoryTracker(PageManager& page_manager): m_page_manager(page_manager) {
 	m_regions = std::make_unique<std::atomic<RegionManager*>[]>(REGION_COUNT);
+	for (size_t i = 0; i < REGION_COUNT; i++) {
+		m_regions[i].store(nullptr, std::memory_order_relaxed);
+	}
 }
 
 MemoryTracker::~MemoryTracker() = default;
@@ -32,8 +34,8 @@ void MemoryTracker::ValidateGpuDirtyPages(const RangeSet& dirty, uint64_t vaddr,
 void MemoryTracker::ValidateGpuDirtyOwnership(const RangeSet& dirty, uint64_t vaddr, uint64_t size,
                                               const char* operation) {
 	ValidateRange(vaddr, size);
-	const auto begin = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
-	const auto end   = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
+	const auto begin = vaddr & ~(TRACKER_PAGE_SIZE - 1);
+	const auto end   = (vaddr + size + TRACKER_PAGE_SIZE - 1) & ~(TRACKER_PAGE_SIZE - 1);
 	for (auto page = begin; page < end; page += TRACKER_PAGE_SIZE) {
 		const bool has_dirty_bytes = dirty.Intersects(page, TRACKER_PAGE_SIZE);
 		if (IsRegionGpuModified(page, TRACKER_PAGE_SIZE) != has_dirty_bytes) {
@@ -80,6 +82,32 @@ bool MemoryTracker::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 		std::scoped_lock lock(manager->lock);
 		return manager->IsModified<DirtySource::Gpu>(offset, bytes);
 	});
+}
+
+bool MemoryTracker::IsRegionFullyGpuModified(uint64_t vaddr, uint64_t size) {
+	CheckNotInUploadCallback();
+	// Missing regions start CPU-dirty, so they must also participate in this test.
+	return !Iterate<true>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+		std::scoped_lock lock(manager->lock);
+		return !manager->IsModified<DirtySource::Gpu, true>(offset, bytes);
+	});
+}
+
+bool MemoryTracker::TryInvalidateCpuWriteWindow(uint64_t fault, uint64_t begin,
+                                                uint64_t size) noexcept {
+	CheckNotInUploadCallback();
+	if (!GuestRange {begin, size}.Valid() || size <= TRACKER_PAGE_SIZE ||
+	    begin % TRACKER_PAGE_SIZE || size % TRACKER_PAGE_SIZE || fault < begin ||
+	    fault - begin >= size ||
+	    begin / TRACKER_REGION_SIZE != (begin + size - 1) / TRACKER_REGION_SIZE)
+		return false;
+	auto* manager = m_regions[begin / TRACKER_REGION_SIZE].load(std::memory_order_acquire);
+	if (!manager) return false;
+	std::scoped_lock lock(manager->lock);
+	if (manager->IsModified<DirtySource::Gpu>(begin - manager->GetCpuAddr(), size)) return false;
+	// The GPU ownership check and permission change share one region lock.
+	manager->ChangeState<DirtySource::Cpu, true>(begin, size);
+	return true;
 }
 
 void MemoryTracker::MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size) {

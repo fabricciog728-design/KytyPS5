@@ -107,7 +107,7 @@ void InitSubsystems() {
 	subsystems.Initialize<Config::Lifecycle>();
 
 	Config::ConfigOptions options;
-	options.printf_direction = Config::LogDirection::Silent;
+	options.printf_direction = Config::OutputDirection::Silent;
 	Config::Load(options);
 
 	subsystems.Initialize<Log::Lifecycle>();
@@ -773,6 +773,14 @@ void TestGuestStackUsesPrivateOwnerMemoryAndCache() {
 	std::printf("[host]    %-48s ok\n", test);
 }
 
+void TestGuestStackExitLifecycle() {
+	const char* test = "GuestStackExitLifecycle";
+	Check(test, Libs::LibKernel::TestGuestStackExitLifecycle(),
+	      "normal return or explicit pthread exit lost its host frame/TLS/return "
+	      "value");
+	std::printf("[host]    %-48s ok\n", test);
+}
+
 void TestMainEntryUsesGuestStackAndDisablesHostChecks() {
 	const char* test = "MainEntryUsesGuestStackAndDisablesHostChecks";
 
@@ -1031,6 +1039,8 @@ void TestDirectMapQueryOffsetAndPartialMunmap() {
 	const auto phys = static_cast<uint64_t>(phys_addr);
 	Check(test, Libs::LibKernel::Memory::TestGuestAddressRangeIsOwned(base, SceKernelPageSize * 4),
 	      "direct mapping escaped the guest owner");
+	Check(test, Libs::LibKernel::Memory::IsUniqueGuestBackingRange(base, SceKernelPageSize),
+	      "single mapping should establish a unique backing range");
 	void* alias = nullptr;
 	CheckOk(test,
 	        Libs::LibKernel::Memory::KernelMapNamedDirectMemory(
@@ -1038,6 +1048,9 @@ void TestDirectMapQueryOffsetAndPartialMunmap() {
 	            "prospero_direct_alias"),
 	        "KernelMapNamedDirectMemory(alias)");
 	const auto alias_base = reinterpret_cast<uint64_t>(alias);
+	Check(test, !Libs::LibKernel::Memory::IsUniqueGuestBackingRange(base, SceKernelPageSize) &&
+	      !Libs::LibKernel::Memory::IsUniqueGuestBackingRange(alias_base, SceKernelPageSize),
+	      "new physical alias must invalidate cached uniqueness");
 
 	constexpr uint64_t alias_test_value = 0x4b595459444d454dull; // "KYTYDMEM"
 	*reinterpret_cast<uint64_t*>(base)  = alias_test_value;
@@ -1109,6 +1122,8 @@ void TestDirectMapQueryOffsetAndPartialMunmap() {
 	    test,
 	    Libs::LibKernel::Memory::KernelMunmap(base + SceKernelPageSize * 2, SceKernelPageSize * 2),
 	    "KernelMunmap(direct right cleanup)");
+	Check(test, Libs::LibKernel::Memory::IsUniqueGuestBackingRange(alias_base, SceKernelPageSize),
+	      "removing original mappings must invalidate cached alias ranges");
 	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(alias_base, SceKernelPageSize * 4),
 	        "KernelMunmap(direct alias cleanup)");
 	CheckOk(test,
@@ -1152,13 +1167,23 @@ void TestDirectPartialProtectUnmapPreservesNeighbors() {
 	        Libs::LibKernel::Memory::KernelMunmap(base + SceKernelPageSize, SceKernelPageSize),
 	        "KernelMunmap(middle)");
 
-	// Access the neighbors without changing their host permissions first.
-	auto* left  = reinterpret_cast<volatile uint64_t*>(base);
-	auto* right = reinterpret_cast<volatile uint64_t*>(base + SceKernelPageSize * 2);
-	*left       = 0x4c45465450524f54ull; // "LEFTPROT"
-	*right      = 0x5247485450524f54ull; // "RGHTPROT"
-	Check(test, *left == 0x4c45465450524f54ull, "partial unmap changed the left neighbor access");
-	Check(test, *right == 0x5247485450524f54ull, "partial unmap changed the right neighbor access");
+	Common::VirtualMemory::Mode old_left {};
+	Common::VirtualMemory::Mode old_right {};
+	Check(test,
+	      Common::VirtualMemory::Protect(base, SceKernelPageSize,
+	                                     Common::VirtualMemory::Mode::ReadWrite, &old_left),
+	      "could not inspect left-page protection");
+	Check(test,
+	      Common::VirtualMemory::Protect(base + SceKernelPageSize * 2, SceKernelPageSize,
+	                                     Common::VirtualMemory::Mode::ReadWrite, &old_right),
+	      "could not inspect right-page protection");
+	Check(test, old_left == Common::VirtualMemory::Mode::ReadWrite,
+	      "partial unmap changed the left neighbor protection");
+	Check(test, old_right == Common::VirtualMemory::Mode::ReadWrite,
+	      "partial unmap changed the right neighbor protection");
+	*reinterpret_cast<uint64_t*>(base) = 0x4c45465450524f54ull; // "LEFTPROT"
+	*reinterpret_cast<uint64_t*>(base + SceKernelPageSize * 2) =
+	    0x5247485450524f54ull; // "RGHTPROT"
 
 	CheckOk(test, Libs::LibKernel::Memory::KernelReleaseDirectMemory(phys_addr, size),
 	        "KernelReleaseDirectMemory");
@@ -1381,6 +1406,23 @@ void TestMunmapAcrossAdjacentFlexibleMappings() {
 	Check(test,
 	      Libs::LibKernel::Memory::ClampRangeSize(base + SceKernelPageSize - 0x100, 0x200) == 0x200,
 	      "ClampRangeSize did not cross adjacent committed mappings");
+	Check(test,
+	      Libs::LibKernel::Memory::ClampRangeSize(base + SceKernelPageSize - 0x80, 0x100) == 0x100,
+	      "cached committed interval changed a contained request");
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMunmap(base + SceKernelPageSize, SceKernelPageSize),
+	        "KernelMunmap(cached right mapping)");
+	Check(test,
+	      Libs::LibKernel::Memory::ClampRangeSize(base + SceKernelPageSize - 0x80, 0x100) == 0x80,
+	      "unmap retained a cached committed interval");
+	right = reinterpret_cast<void*>(base + SceKernelPageSize);
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMapNamedFlexibleMemory(
+	            &right, SceKernelPageSize, SceKernelProtCpuRw, SceKernelMapFixed, "adjacent_right"),
+	        "KernelMapNamedFlexibleMemory(remap cached right)");
+	Check(test,
+	      Libs::LibKernel::Memory::ClampRangeSize(base + SceKernelPageSize - 0x80, 0x100) == 0x100,
+	      "remap did not restore the complete committed interval");
 	Check(test,
 	      Libs::LibKernel::Memory::ProtectGuestHostMemory(base, SceKernelPageSize * 2,
 	                                                      Common::VirtualMemory::Mode::Read),
@@ -2542,6 +2584,10 @@ void TestModuleRelocationUsesWritableHostMapping() {
 
 int main(int argc, char** argv) {
 	InitSubsystems();
+	if (argc == 2 && std::strcmp(argv[1], "--guest-stack-exit-only") == 0) {
+		RunTest(TestGuestStackExitLifecycle);
+		return g_failed_tests == 0 ? 0 : 1;
+	}
 	if (argc == 2 && std::strcmp(argv[1], "--red-zone-patcher-only") == 0) {
 		RunTest(TestWindowsGuestRedZoneStaticPatcher);
 		return g_failed_tests == 0 ? 0 : 1;
@@ -2559,6 +2605,7 @@ int main(int argc, char** argv) {
 	RunTest(TestFlexibleNoCoalescePreservesBoundaries);
 	RunTest(TestFlexibleMemoryReuseIsZeroFilled);
 	RunTest(TestSmallerFlexibleMapReusesReleasedHole);
+	RunTest(TestGuestStackExitLifecycle);
 	RunTest(TestGuestStackUsesPrivateOwnerMemoryAndCache);
 	RunTest(TestMainEntryUsesGuestStackAndDisablesHostChecks);
 	RunTest(TestFragmentedBackingUnmapRollback);

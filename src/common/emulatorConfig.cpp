@@ -83,7 +83,7 @@ ShaderOptimizationType GetShaderOptimizationType() {
 	return g_config->shader_optimization_type;
 }
 
-LogDirection GetShaderLogDirection() {
+ShaderLogDirection GetShaderLogDirection() {
 	return g_config->shader_log_direction;
 }
 
@@ -103,7 +103,7 @@ bool GraphicsDebugDumpEnabled() {
 	return g_config->graphics_debug_dump_enabled;
 }
 
-LogDirection GetPrintfDirection() {
+OutputDirection GetPrintfDirection() {
 	return g_config->printf_direction;
 }
 
@@ -111,8 +111,8 @@ std::filesystem::path GetPrintfOutputFile() {
 	return g_config->printf_output_file;
 }
 
-bool ProfilerEnabled() {
-	return g_config->profiler_enabled;
+ProfilerDirection GetProfilerDirection() {
+	return g_config->profiler_direction;
 }
 
 bool SpirvDebugPrintfEnabled() {

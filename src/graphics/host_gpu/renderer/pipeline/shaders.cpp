@@ -117,6 +117,10 @@ static void GetInputFormat(const ShaderBufferResource& res, vk::Format& format, 
 		}
 		format = vk::Format::eR16G16Sfloat;
 		size   = 2;
+		if (NarrowInputFormat(format, size, used_components)) {
+			LOGF("InputFormat: narrowing fmt=%u to %s for used_components=%u\n", raw_format,
+			     vk::to_string(format).c_str(), used_components);
+		}
 		return;
 	}
 
@@ -259,19 +263,11 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		                                       .pName  = "main"};
 	}
 	if (rect_list) {
-		shader_stages[shader_stage_count++] = {.stage =
-		                                           vk::ShaderStageFlagBits::eTessellationControl,
-		                                       .module = tess_control_shader_module,
-		                                       .pName  = "main"};
-		shader_stages[shader_stage_count++] = {.stage =
-		                                           vk::ShaderStageFlagBits::eTessellationEvaluation,
-		                                       .module = tess_eval_shader_module,
-		                                       .pName  = "main"};
+		shader_stages[shader_stage_count++] = tess_control_shader_stage_info;
+		shader_stages[shader_stage_count++] = tess_eval_shader_stage_info;
 	}
 	if (ps_active) {
-		shader_stages[shader_stage_count++] = {.stage  = vk::ShaderStageFlagBits::eFragment,
-		                                       .module = pixel_program.module,
-		                                       .pName  = "main"};
+		shader_stages[shader_stage_count++] = frag_shader_stage_info;
 	}
 
 	vk::VertexInputAttributeDescription input_attr[ShaderVertexInputInfo::RES_MAX] {};
@@ -394,7 +390,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		EXIT_NOT_IMPLEMENTED((static_params.color_mask[i] & ~0x0fu) != 0);
 		color_blend_attachment[i].colorWriteMask =
 		    vk::ColorComponentFlags {static_params.color_mask[i]};
-		color_blend_attachment[i].blendEnable = static_params.blend_enable[i] ? VK_TRUE : VK_FALSE;
+		color_blend_attachment[i].blendEnable =
+		    (static_params.blend_enable[i] && !static_params.blend_bypass[i]) ? VK_TRUE : VK_FALSE;
 		color_blend_attachment[i].srcColorBlendFactor =
 		    GetBlendFactor(static_params.color_srcblend[i]);
 		color_blend_attachment[i].dstColorBlendFactor =

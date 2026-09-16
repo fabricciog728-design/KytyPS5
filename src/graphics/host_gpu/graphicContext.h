@@ -19,6 +19,7 @@ struct VulkanImage;
 inline constexpr uint32_t VULKAN_TARGET_API_VERSION = VK_API_VERSION_1_3;
 
 struct GraphicContext {
+	bool fragment_subgroup_reduction = false;
 	vk::Instance                       instance                              = nullptr;
 	vk::DebugUtilsMessengerEXT         debug_messenger                       = nullptr;
 	vk::PhysicalDevice                 physical_device                       = nullptr;
@@ -27,6 +28,7 @@ struct GraphicContext {
 	vk::Device                         device                                = nullptr;
 	VmaAllocator                       allocator                             = nullptr;
 	bool                               memory_budget_ext_enabled             = false;
+	bool                               rt_extensions_enabled                 = false;
 	bool                               compute_subgroup_size_control_enabled = false;
 	bool                               sample_rate_shading_enabled           = false;
 	bool                               attachment_feedback_loop_enabled      = false;
@@ -98,6 +100,10 @@ struct GraphicContext {
 	[[nodiscard]] uint64_t GetTotalMemoryBudget() const;
 	[[nodiscard]] bool     CreateImage(const vk::ImageCreateInfo& info, VulkanImage& image);
 	void                   DeleteImage(VulkanImage& image);
+	void                   AppendHardwareRayTracingDeviceExtensions(
+	    const std::vector<vk::ExtensionProperties>& available_extensions,
+	    std::vector<const char*>&                   device_extensions);
+	void LoadHardwareRayTracingFunctions() const;
 
 	uint32_t screen_width  = 0;
 	uint32_t screen_height = 0;
