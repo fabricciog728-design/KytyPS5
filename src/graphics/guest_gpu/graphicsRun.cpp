@@ -757,7 +757,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		if (packet_header == 0xc0032500u && !GraphicsRunDebugDumpEnabled()) {
 			const auto consumed = TryDrawIndirectRun({packet, remaining_dw});
 			if (consumed) {
-				execution.m_buffer_stack[buffer_index].offset_dw += consumed;
+				cursor.offset_dw += consumed;
 				execution.m_made_progress = true;
 				continue;
 			}
